@@ -389,7 +389,6 @@ with tab2:
                 f"{spent:.1f}", str(players_added), f"{team_budget:.1f}", f"{rem:.1f}", str(players_needed)
             ]
             
-        # Apply Pandas Styling to the Summary Table
         def color_summary(df):
             style_df = pd.DataFrame('', index=df.index, columns=df.columns)
             for c in df.columns:
@@ -412,7 +411,7 @@ with tab2:
         grid_df = pd.DataFrame(index=[f"Round {i+1}" for i in range(squad_size)])
         for t in valid_teams:
             grid_df[t] = ""
-            grid_df[f"{t} Rtg"] = np.nan  # Initialize as NaN for heatmap coloring
+            grid_df[f"{t} Rtg"] = np.nan
 
         # Pre-fill grid with drafted players
         for t in valid_teams:
@@ -424,24 +423,23 @@ with tab2:
                         grid_df.iat[i, grid_df.columns.get_loc(t)] = p_name
                         grid_df.iat[i, grid_df.columns.get_loc(f"{t} Rtg")] = float(p_match.iloc[0]['AI Rating'])
 
-        # Config dropdown options (Only "Team Players" allowed)
         avail_team_players = master_df[(master_df['Draft Status'] == "Available") & (master_df['Pool Status'] == "Team Player")].sort_values('AI Rating', ascending=False)
         avail_names = avail_team_players['Player'].tolist()
 
         col_config = {}
         for t in valid_teams:
             t_drafted = [p for p, team in draft_state.items() if team == t]
+            # Ensure the cells function exactly as dropdowns via SelectboxColumn
             opts = [""] + t_drafted + avail_names
-            col_config[t] = st.column_config.SelectboxColumn(f"{t} Name", options=opts)
+            col_config[t] = st.column_config.SelectboxColumn(f"{t} Name", options=opts, required=False)
             col_config[f"{t} Rtg"] = st.column_config.Column(f"Ratings", disabled=True)
 
-        # Apply Heatmap Gradient to the Grid Ratings
+        # Apply Heatmap STRICTLY to Rating columns
         rtg_cols = [f"{t} Rtg" for t in valid_teams]
         styled_grid = grid_df.style.background_gradient(subset=rtg_cols, cmap='RdYlGn', vmin=10, vmax=30).format({c: "{:.1f}" for c in rtg_cols}, na_rep="")
 
         edited_grid = st.data_editor(styled_grid, column_config=col_config, use_container_width=True, key="live_grid")
 
-        # Check if Names Changed (Avoids NaN comparison issues)
         grid_changed = False
         for t in valid_teams:
             for i in range(squad_size):
@@ -457,7 +455,6 @@ with tab2:
         if grid_changed:
             new_draft_state = draft_state.copy()
             
-            # Validation Loop
             for t in valid_teams:
                 t_players = []
                 for i in range(squad_size):
@@ -476,7 +473,6 @@ with tab2:
                     st.error(f"❌ INVALID ROSTER: {t} must save at least {min_req:.1f} points for remaining {squad_size - t_count} slots. Edit reverted.")
                     st.stop()
             
-            # Application Loop
             for t in valid_teams:
                 for i in range(squad_size):
                     old_val = grid_df.iat[i, grid_df.columns.get_loc(t)]
