@@ -16,9 +16,8 @@ DRAFT_FILE = "draft_state.json"
 RATINGS_FILE = "human_ratings.json"
 USERS_FILE = "authorized_users.json"
 
-ADMIN_PASSWORD = "bpladmin"  # Password for the Admin tab
+ADMIN_PASSWORD = "bpladmin" 
 
-# Hardcoded default mappings so you never lose these specific merges
 DEFAULT_MAPPINGS = {
     "Praveenraj Starkey": "Praveenraj Starkey (Merged)",
     "Praveen Starkey": "Praveenraj Starkey (Merged)",
@@ -52,12 +51,14 @@ def save_json(filepath, data):
 
 # --- LOAD STATES ---
 saved_mapping = load_json(MAPPING_FILE, {})
-# Inject default mappings if they haven't been saved yet
+# PERFORMANCE FIX 1: Only save to disk if a default mapping was actually missing (prevents infinite loop)
+mapping_changed = False
 for original, merged in DEFAULT_MAPPINGS.items():
     if original not in saved_mapping:
         saved_mapping[original] = merged
-# Save the injected defaults back to disk immediately
-save_json(MAPPING_FILE, saved_mapping)
+        mapping_changed = True
+if mapping_changed:
+    save_json(MAPPING_FILE, saved_mapping)
 
 draft_state = load_json(DRAFT_FILE, {}) 
 human_ratings = load_json(RATINGS_FILE, {}) 
@@ -68,10 +69,11 @@ TEAMS = ["Available", "Team 1", "Team 2", "Team 3", "Team 4", "Team 5"]
 st.title("🏏 BPL Cricket Rating Engine")
 st.markdown("Advanced AI Rating, Live Roster Management, and Committee Scouting.")
 
-# --- DATA PROCESSING ENGINE ---
-@st.cache_data
-def load_and_process_data(mapping):
-    if not os.path.exists(DATA_FILE): return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), set()
+# --- PERFORMANCE FIX 2: TWO-TIER CACHING ---
+# Tier 1: Read the heavy Excel file ONLY when the file itself is physically updated
+@st.cache_data(show_spinner="Reading Excel File (Only happens once)...")
+def get_raw_excel_data(file_mod_time):
+    if not os.path.exists(DATA_FILE): return pd.DataFrame(), pd.DataFrame(), []
     xls = pd.ExcelFile(DATA_FILE)
     bat_dfs, bowl_dfs = [], []
     raw_names = set()
@@ -88,25 +90,34 @@ def load_and_process_data(mapping):
 
     raw_bat = pd.concat(bat_dfs, ignore_index=True) if bat_dfs else pd.DataFrame()
     raw_bowl = pd.concat(bowl_dfs, ignore_index=True) if bowl_dfs else pd.DataFrame()
-    
-    if raw_bat.empty and raw_bowl.empty: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), raw_names
+    return raw_bat, raw_bowl, sorted(list(raw_names))
 
-    if not raw_bat.empty: raw_bat['Player'] = raw_bat['Player'].map(mapping).fillna(raw_bat['Player'])
-    if not raw_bowl.empty: raw_bowl['Player'] = raw_bowl['Player'].map(mapping).fillna(raw_bowl['Player'])
+# Tier 2: Run the math engine instantly using the cached data
+@st.cache_data(show_spinner="Crunching AI Ratings...")
+def calculate_ratings(raw_bat, raw_bowl, mapping):
+    if raw_bat.empty and raw_bowl.empty: return pd.DataFrame()
+    
+    # Copy to avoid altering cached data
+    rbat = raw_bat.copy()
+    rbowl = raw_bowl.copy()
+
+    if not rbat.empty: rbat['Player'] = rbat['Player'].map(mapping).fillna(rbat['Player'])
+    if not rbowl.empty: rbowl['Player'] = rbowl['Player'].map(mapping).fillna(rbowl['Player'])
 
     for col in ['Runs', 'SR', 'Inns', 'NO']:
-        raw_bat[col] = pd.to_numeric(raw_bat.get(col, 0), errors='coerce').fillna(0)
-    raw_bat['Balls_Faced'] = np.where(raw_bat['SR'] > 0, (raw_bat['Runs'] / raw_bat['SR']) * 100, 0)
-    raw_bat['Dismissals'] = (raw_bat['Inns'] - raw_bat['NO']).clip(lower=0)
-    agg_bat = raw_bat.groupby('Player').agg(Inns=('Inns', 'sum'), Runs_bat=('Runs', 'sum'), Balls_Faced=('Balls_Faced', 'sum'), Dismissals=('Dismissals', 'sum')).reset_index()
+        rbat[col] = pd.to_numeric(rbat.get(col, 0), errors='coerce').fillna(0)
+    rbat['Balls_Faced'] = np.where(rbat['SR'] > 0, (rbat['Runs'] / rbat['SR']) * 100, 0)
+    rbat['Dismissals'] = (rbat['Inns'] - rbat['NO']).clip(lower=0)
+    agg_bat = rbat.groupby('Player').agg(Inns=('Inns', 'sum'), Runs_bat=('Runs', 'sum'), Balls_Faced=('Balls_Faced', 'sum'), Dismissals=('Dismissals', 'sum')).reset_index()
 
     for col in ['Runs', 'Wkts', 'Overs']:
-        raw_bowl[col] = pd.to_numeric(raw_bowl.get(col, 0), errors='coerce').fillna(0)
-    raw_bowl['Balls_Bowled'] = raw_bowl['Overs'].apply(overs_to_balls)
-    agg_bowl = raw_bowl.groupby('Player').agg(Balls_Bowled=('Balls_Bowled', 'sum'), Runs_bowl=('Runs', 'sum'), Wkts=('Wkts', 'sum')).reset_index()
+        rbowl[col] = pd.to_numeric(rbowl.get(col, 0), errors='coerce').fillna(0)
+    rbowl['Balls_Bowled'] = rbowl['Overs'].apply(overs_to_balls)
+    agg_bowl = rbowl.groupby('Player').agg(Balls_Bowled=('Balls_Bowled', 'sum'), Runs_bowl=('Runs', 'sum'), Wkts=('Wkts', 'sum')).reset_index()
 
     valid = pd.merge(agg_bat, agg_bowl, on='Player', how='outer').fillna(0)
     valid = valid[(valid['Balls_Faced'] >= 12) | (valid['Balls_Bowled'] >= 18)].copy()
+    if valid.empty: return pd.DataFrame()
 
     valid['SR_bat'] = np.where(valid['Balls_Faced'] > 0, (valid['Runs_bat'] / valid['Balls_Faced']) * 100, 0)
     valid['Econ'] = np.where(valid['Balls_Bowled'] > 0, (valid['Runs_bowl'] / valid['Balls_Bowled']) * 6, 999)
@@ -141,9 +152,12 @@ def load_and_process_data(mapping):
 
     valid['Tier'] = pd.cut(valid['AI Rating'], bins=[0, 18, 23, 27, 31], labels=["Bronze", "Silver", "Gold", "Platinum"])
     
-    return valid, raw_bat, raw_bowl, raw_names
+    return valid
 
-master_df, raw_bat, raw_bowl, all_raw_names = load_and_process_data(saved_mapping)
+# Execution Engine
+file_time = os.path.getmtime(DATA_FILE) if os.path.exists(DATA_FILE) else 0
+raw_bat_cache, raw_bowl_cache, all_raw_names = get_raw_excel_data(file_time)
+master_df = calculate_ratings(raw_bat_cache, raw_bowl_cache, saved_mapping)
 
 if not master_df.empty:
     def get_avg_scout(player_name):
@@ -330,7 +344,7 @@ with tab6:
         st.markdown("### 4. 🛠️ Player Name Aliases & Merge Tool")
         st.write("Edit the **'Merged Name'** column to merge aliases dynamically.")
         if all_raw_names:
-            mapping_records = [{"Original Name": n, "Merged Name": saved_mapping.get(n, n)} for n in sorted(list(all_raw_names))]
+            mapping_records = [{"Original Name": n, "Merged Name": saved_mapping.get(n, n)} for n in all_raw_names]
             mapping_df = pd.DataFrame(mapping_records)
             edited_mapping = st.data_editor(mapping_df, use_container_width=True, hide_index=True)
             
@@ -356,7 +370,7 @@ with tab6:
             }
             backup_json = json.dumps(backup_data, indent=2).encode('utf-8')
             st.download_button(
-                label="📥 1. Download Server Backup (Save State)", 
+                label="📥 Download Server Backup", 
                 data=backup_json, 
                 file_name="bpl_server_backup.json", 
                 mime="application/json",
@@ -364,7 +378,7 @@ with tab6:
             )
             
         with bc2:
-            restore_file = st.file_uploader("📤 2. Restore from Backup (.json)", type=["json"])
+            restore_file = st.file_uploader("📤 Restore from Backup (.json)", type=["json"])
             if restore_file:
                 restore_data = json.load(restore_file)
                 if "mappings" in restore_data:
