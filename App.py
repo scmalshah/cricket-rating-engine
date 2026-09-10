@@ -406,21 +406,21 @@ with tab2:
 
         # --- EXCEL-STYLE INTERACTIVE DRAFT GRID ---
         st.markdown("#### 📋 Official Draft Board Grid")
-        st.write("Click any empty cell to pick an available Team Player. Players instantly vanish from the pool once selected.")
+        st.write("Click any empty cell to pick an available player. The 🔒 icon indicates players who are already locked in from previous rounds.")
         
         grid_df = pd.DataFrame(index=[f"Round {i+1}" for i in range(squad_size)])
         for t in valid_teams:
             grid_df[t] = ""
             grid_df[f"{t} Rtg"] = np.nan
 
-        # Pre-fill grid with drafted players
+        # Pre-fill grid with drafted players + Add Lock Icon
         for t in valid_teams:
             t_players = [p for p, team in draft_state.items() if team == t]
             for i, p_name in enumerate(t_players):
                 if i < squad_size:
                     p_match = master_df[master_df['Player'] == p_name]
                     if not p_match.empty:
-                        grid_df.iat[i, grid_df.columns.get_loc(t)] = p_name
+                        grid_df.iat[i, grid_df.columns.get_loc(t)] = f"🔒 {p_name}"
                         grid_df.iat[i, grid_df.columns.get_loc(f"{t} Rtg")] = float(p_match.iloc[0]['AI Rating'])
 
         avail_team_players = master_df[(master_df['Draft Status'] == "Available") & (master_df['Pool Status'] == "Team Player")].sort_values('AI Rating', ascending=False)
@@ -429,8 +429,10 @@ with tab2:
         col_config = {}
         for t in valid_teams:
             t_drafted = [p for p, team in draft_state.items() if team == t]
-            # Ensure the cells function exactly as dropdowns via SelectboxColumn
-            opts = [""] + t_drafted + avail_names
+            locked_opts = [f"🔒 {p}" for p in t_drafted]
+            
+            # The dropdown will clearly show locked players vs available players
+            opts = [""] + locked_opts + avail_names
             col_config[t] = st.column_config.SelectboxColumn(f"{t} Name", options=opts, required=False)
             col_config[f"{t} Rtg"] = st.column_config.Column(f"Ratings", disabled=True)
 
@@ -455,11 +457,19 @@ with tab2:
         if grid_changed:
             new_draft_state = draft_state.copy()
             
+            # Extract and validate clean names (stripping the lock icon)
             for t in valid_teams:
                 t_players = []
                 for i in range(squad_size):
                     val = edited_grid.iat[i, edited_grid.columns.get_loc(t)]
-                    if val: t_players.append(val)
+                    if val:
+                        clean_name = val.replace("🔒 ", "")
+                        t_players.append(clean_name)
+                
+                # REJECTION: Prevent duplicate picks on the same team
+                if len(t_players) != len(set(t_players)):
+                    st.error(f"❌ REJECTED: {t} attempted to draft a player who is already locked on their roster.")
+                    st.stop()
                 
                 t_spent = sum([master_df[master_df['Player'] == p]['AI Rating'].iloc[0] for p in t_players if p in master_df['Player'].values])
                 t_rem = team_budget - t_spent
@@ -473,12 +483,13 @@ with tab2:
                     st.error(f"❌ INVALID ROSTER: {t} must save at least {min_req:.1f} points for remaining {squad_size - t_count} slots. Edit reverted.")
                     st.stop()
             
+            # Apply Changes
             for t in valid_teams:
                 for i in range(squad_size):
                     old_val = grid_df.iat[i, grid_df.columns.get_loc(t)]
                     new_val = edited_grid.iat[i, edited_grid.columns.get_loc(t)]
-                    old_v = old_val if old_val else ""
-                    new_v = new_val if new_val else ""
+                    old_v = old_val.replace("🔒 ", "") if old_val else ""
+                    new_v = new_val.replace("🔒 ", "") if new_val else ""
                     
                     if old_v != new_v:
                         if old_v and old_v in new_draft_state:
