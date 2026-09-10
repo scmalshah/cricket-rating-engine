@@ -288,18 +288,13 @@ if not master_df.empty:
     master_df['Leadership'] = master_df['Player'].apply(lambda x: leadership_state.get(x, "None"))
     master_df['Pool Status'] = master_df['Player'].apply(lambda x: pool_state.get(x, "Team Player"))
     
-    # Extract Individual Scout Ratings dynamically
     for u in auth_users:
         master_df[u] = master_df['Player'].apply(lambda x: human_ratings.get(x, {}).get(u, {}).get('Final', np.nan))
     
-    # Calculate Average and Apply Overrides
     master_df['Avg Scout Score'] = master_df[auth_users].mean(axis=1)
     master_df['Scout Override'] = master_df['Player'].apply(lambda x: scout_overrides.get(x, np.nan))
-    
-    # Final Scout Rating prioritizes Override, falls back to Average Scout Score
     master_df['Final Scout Rating'] = master_df['Scout Override'].combine_first(master_df['Avg Scout Score'])
 
-# --- BULLETPROOF DICTIONARY MAPPERS ---
 player_to_string_map = {}
 string_to_player_map = {"--- CLEAR PICK ---": "", "": ""}
 
@@ -336,7 +331,6 @@ with tab1:
 
         disp_df['Player'] = disp_df.apply(lambda r: f"{r['Player']} (C)" if r['Leadership'] == 'Captain' else (f"{r['Player']} (VC)" if r['Leadership'] == 'Vice Captain' else r['Player']), axis=1)
 
-        # Dynamic Column Ordering (Injecting Individual Evaluators and Overrides)
         col_order = [
             'Player', 'Role', 'Tier', 'Pool Status',
             'Runs_bat', 'Bat Avg', 'SR_bat', 'Boundary_Pct',
@@ -346,7 +340,6 @@ with tab1:
         
         disp_df = disp_df[col_order].sort_values('AI Rating', ascending=False)
         
-        # Friendly Headers
         rename_cols = {
             'Runs_bat': 'Runs', 'SR_bat': 'Bat SR', 'Boundary_Pct': 'Bound %',
             'Bowl Avg': 'Bowl Avg', 'Bowl SR': 'Bowl SR', 'Econ': 'Econ', 'Extras_Rate': 'Extras/Ov',
@@ -355,7 +348,6 @@ with tab1:
         disp_df.rename(columns=rename_cols, inplace=True)
         disp_df = disp_df.set_index('Player')
         
-        # Dynamic Formatting Dict for Pandas Styler
         fmt_dict = {
             'Runs': '{:.0f}', 'Wkts': '{:.0f}', 'Fielding': '{:.0f}',
             'Bat Avg': '{:.2f}', 'Bat SR': '{:.1f}', 'Bound %': '{:.1f}%',
@@ -395,7 +387,6 @@ with tab2:
         st.markdown("---")
         st.markdown(f"### 🟢 ON THE CLOCK: **{on_the_clock}** (Round {round_num}, Pick {pick_in_round + 1})")
         
-        # --- STYLED SUMMARY STATISTICS TABLE ---
         st.markdown("#### 💰 Franchise Cap & Roster Summary")
         sum_df = pd.DataFrame(index=["Total Points Burnt", "Total Players Added", "Total Points Allocated", "Remaining Points", "Players yet to take"])
         
@@ -426,7 +417,6 @@ with tab2:
 
         st.dataframe(sum_df.style.apply(color_summary, axis=None), use_container_width=True)
 
-        # --- EXCEL-STYLE INTERACTIVE DRAFT GRID ---
         st.markdown("#### 📋 Official Draft Board Grid")
         st.write("Click an empty cell to pick a player. If you need to remove someone, select **`--- CLEAR PICK ---`**.")
         
@@ -439,7 +429,6 @@ with tab2:
             grid_df[t] = ""
             grid_df[f"{t} Rtg"] = np.nan
 
-        # Pre-fill grid with EXACT mapped strings
         for t in valid_teams:
             t_players = [p for p, team in draft_state.items() if team == t]
             for i, p_name in enumerate(t_players):
@@ -605,13 +594,87 @@ with tab5:
     if master_df.empty:
         st.info("Data required.")
     else:
-        st.subheader("📝 Mass Committee Scouting & Overrides")
-        st.write("Rate players individually or override the committee's final score completely.")
-        
+        st.subheader("📝 Committee Scouting & Overrides")
         evaluator = st.selectbox("Select Your Name", auth_users)
         
-        st.markdown(f"### Evaluating as: **{evaluator}**")
-        st.write("Edit your scores directly in the table below. The AI Ratings (Bat/Bowl/Field/Total) are provided next to your columns to serve as your peer benchmarking tool. You do not need to fill out all columns; you can jump straight to 'My Final Score' if you prefer.")
+        st.markdown("---")
+        st.markdown("### 🔍 1. Single Player Deep Dive & Peer Benchmarking")
+        st.write("Use this tool to evaluate specific player skills and instantly see AI peers with similar scores.")
+        
+        sc1, sc2 = st.columns(2)
+        scout_player = sc1.selectbox("Select Player to Rate", master_df.sort_values('Player')['Player'])
+        
+        existing_data = human_ratings.get(scout_player, {}).get(evaluator, {})
+        if not isinstance(existing_data, dict): existing_data = {}
+        
+        engine_role = master_df[master_df['Player'] == scout_player].iloc[0]['Role'] if scout_player in master_df['Player'].values else "Batter"
+        def_role = existing_data.get("Role", engine_role)
+        def_bat = existing_data.get("Bat", 20.0)
+        def_bowl = existing_data.get("Bowl", 20.0)
+        def_field = existing_data.get("Field", 20.0)
+        
+        sel_role = sc2.selectbox("Assign Player Role", ["Batter", "Bowler", "All-Rounder"], index=["Batter", "Bowler", "All-Rounder"].index(def_role))
+        
+        c_bat, c_bowl, c_fld = st.columns(3)
+        
+        def display_peer_slider(col_obj, title, def_val, skill_col):
+            with col_obj:
+                val = st.slider(title, 10.0, 30.0, float(def_val), step=0.5)
+                min_v, max_v = val - 1.5, val + 1.5
+                peers = master_df[(master_df[skill_col] >= min_v) & (master_df[skill_col] <= max_v)].copy()
+                
+                if peers.empty:
+                    st.caption(f"*No AI peers in {min_v:.1f} - {max_v:.1f} range.*")
+                else:
+                    peers['diff'] = abs(peers[skill_col] - val)
+                    top_peers = peers.sort_values('diff').head(5)
+                    peer_str = ", ".join([f"{r['Player']} ({r[skill_col]:.1f})" for _, r in top_peers.iterrows()])
+                    st.caption(f"**🔍 AI Peers ({min_v:.1f}-{max_v:.1f}):**<br>{peer_str}", unsafe_allow_html=True)
+                return val
+
+        val_bat = display_peer_slider(c_bat, f"Batting Rating ({scout_player})", def_bat, "Bat_Rating")
+        val_bowl = display_peer_slider(c_bowl, f"Bowling Rating ({scout_player})", def_bowl, "Bowl_Rating")
+        val_fld = display_peer_slider(c_fld, f"Fielding Rating ({scout_player})", def_field, "Field_Rating")
+        
+        w = algo_weights
+        if sel_role == 'Batter': 
+            tot = w['wt_batter_bat'] + w['wt_batter_field'] or 1
+            calc_final = (val_bat * (w['wt_batter_bat']/tot)) + (val_fld * (w['wt_batter_field']/tot))
+        elif sel_role == 'Bowler': 
+            tot = w['wt_bowler_bowl'] + w['wt_bowler_field'] or 1
+            calc_final = (val_bowl * (w['wt_bowler_bowl']/tot)) + (val_fld * (w['wt_bowler_field']/tot))
+        else: 
+            tot = w['wt_ar_bat'] + w['wt_ar_bowl'] + w['wt_ar_field'] or 1
+            raw_ar = (val_bat * (w['wt_ar_bat']/tot)) + (val_bowl * (w['wt_ar_bowl']/tot)) + (val_fld * (w['wt_ar_field']/tot))
+            calc_final = min(30.0, raw_ar * w['ar_multiplier'])
+            
+        col1, col2 = st.columns([3, 1])
+        col1.info(f"**Calculated Final Scout Rating:** {calc_final:.1f} / 30.0")
+        if col2.button("💾 Save Deep Dive Rating", type="primary", use_container_width=True):
+            if scout_player not in human_ratings: human_ratings[scout_player] = {}
+            human_ratings[scout_player][evaluator] = {
+                "Role": sel_role,
+                "Bat": val_bat,
+                "Bowl": val_bowl,
+                "Field": val_fld,
+                "Final": float(round(calc_final, 1))
+            }
+            save_json(RATINGS_FILE, human_ratings)
+            st.success(f"Deep Dive breakdown saved for {scout_player}!")
+            st.rerun()
+
+        st.markdown("---")
+        st.markdown("### 📋 2. Mass Scouting & Overrides Table")
+        st.write("Edit final scores directly in the table. The **Closest AI Peers** column shows similar players based on their overall rating.")
+        
+        # Helper to get overall AI peers for the table display
+        def get_total_peers(player_name, rating):
+            min_v, max_v = rating - 1.5, rating + 1.5
+            peers = master_df[(master_df['AI Rating'] >= min_v) & (master_df['AI Rating'] <= max_v) & (master_df['Player'] != player_name)].copy()
+            if peers.empty: return "None"
+            peers['diff'] = abs(peers['AI Rating'] - rating)
+            top_peers = peers.sort_values('diff').head(3)
+            return ", ".join([f"{r['Player']} ({r['AI Rating']:.1f})" for _, r in top_peers.iterrows()])
         
         # Build DataFrame for the current evaluator
         scout_records = []
@@ -626,6 +689,7 @@ with tab5:
                 "AI Bowl Rtg": float(row['Bowl_Rating']),
                 "AI Field Rtg": float(row['Field_Rating']),
                 "AI Total": float(row['AI Rating']),
+                "Closest AI Peers (±1.5)": get_total_peers(p_name, row['AI Rating']),
                 "My Bat": e_data.get("Bat", None),
                 "My Bowl": e_data.get("Bowl", None),
                 "My Field": e_data.get("Field", None),
@@ -643,6 +707,7 @@ with tab5:
             "AI Bowl Rtg": st.column_config.NumberColumn(disabled=True, format="%.1f"),
             "AI Field Rtg": st.column_config.NumberColumn(disabled=True, format="%.1f"),
             "AI Total": st.column_config.NumberColumn(disabled=True, format="%.1f"),
+            "Closest AI Peers (±1.5)": st.column_config.TextColumn(disabled=True),
             "Avg Scout Score": st.column_config.NumberColumn(disabled=True, format="%.1f"),
             "My Bat": st.column_config.NumberColumn("My Bat", min_value=10.0, max_value=30.0, step=0.1),
             "My Bowl": st.column_config.NumberColumn("My Bowl", min_value=10.0, max_value=30.0, step=0.1),
@@ -657,17 +722,15 @@ with tab5:
         
         edited_scout = st.data_editor(styled_scout, column_config=s_config, hide_index=True, use_container_width=True, height=600)
         
-        if st.button("💾 Save All Scouting Data", type="primary"):
+        if st.button("💾 Save All Table Data", type="primary"):
             for _, row in edited_scout.iterrows():
                 p_name = row['Player']
                 
-                # Extract Evaluator Data
                 my_bat = row['My Bat']
                 my_bowl = row['My Bowl']
                 my_fld = row['My Field']
                 my_fin = row['My Final Score']
                 
-                # Check if user entered anything
                 if pd.notna(my_bat) or pd.notna(my_bowl) or pd.notna(my_fld) or pd.notna(my_fin):
                     if p_name not in human_ratings: human_ratings[p_name] = {}
                     
@@ -679,16 +742,15 @@ with tab5:
                         "Final": float(my_fin) if pd.notna(my_fin) else 20.0
                     }
                     
-                # Extract Master Override Data
                 m_override = row['Master Override']
                 if pd.notna(m_override):
                     scout_overrides[p_name] = float(m_override)
                 elif p_name in scout_overrides:
-                    del scout_overrides[p_name] # Remove override if they deleted it
+                    del scout_overrides[p_name] 
 
             save_json(RATINGS_FILE, human_ratings)
             save_json(OVERRIDES_FILE, scout_overrides)
-            st.success("✅ Bulk evaluations and overrides saved successfully!")
+            st.success("✅ Bulk table evaluations and overrides saved successfully!")
             st.rerun()
 
 # --- TAB 6: METHODOLOGY ---
