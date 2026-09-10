@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import os
 import json
+import re
 
 st.set_page_config(page_title="🏏 Cricket Draft Board & Rating Engine", layout="wide")
 
@@ -15,12 +16,14 @@ def clean_col_name(c):
 
 def clean_prefix(name):
     if not isinstance(name, str): return ""
-    name = name.replace('\xa0', ' ').strip()
+    # Strip spaces and \xa0, then reduce multiple spaces to a single space
+    name = re.sub(' +', ' ', name.replace('\xa0', ' ').strip())
+    # Remove capital letter organizational prefixes (e.g., PR, DI)
     if len(name) > 2 and name[:2].isupper():
         prefix = name[:2]
         rest = name[2:]
         if rest[:2].upper() == prefix:
-            return rest
+            return rest.strip()
     return name
 
 def overs_to_balls(overs):
@@ -32,6 +35,10 @@ def overs_to_balls(overs):
         return complete * 6 + balls
     except:
         return 0
+
+def format_overs(balls):
+    balls = int(balls)
+    return float(f"{balls // 6}.{balls % 6}")
 
 def load_saved_mappings():
     if os.path.exists(MAPPING_FILE):
@@ -132,20 +139,19 @@ with st.expander("🛠️ Player Name Aliases & Merge Tool (Saved Permanently)",
     
     if st.button("💾 Save Player Mappings Permanently", type="primary"):
         new_map = dict(zip(edited_mapping["Original Name"], edited_mapping["Merged Name"]))
-        # Update our persistent dictionary and write to disk
         saved_mapping.update(new_map)
         save_mappings_to_disk(saved_mapping)
         st.success("✅ Mappings saved permanently!")
         st.rerun()
 
-# Apply the persistent name mappings
+# --- SECTION 2: MERGE STATS (INTO A SINGLE ROW) ---
+# Apply the persistent name mappings BEFORE grouping
 active_map = dict(zip(edited_mapping["Original Name"], edited_mapping["Merged Name"]))
 
 if not raw_bat.empty: raw_bat['Player'] = raw_bat['Player'].map(active_map).fillna(raw_bat['Player'])
 if not raw_bowl.empty: raw_bowl['Player'] = raw_bowl['Player'].map(active_map).fillna(raw_bowl['Player'])
 
-# --- SECTION 2: CALCULATION ENGINE ---
-# Aggregate Batting
+# Aggregate Batting (This squashes duplicates into 1 row)
 for col in ['Runs', 'SR', 'Inns', 'NO']:
     raw_bat[col] = pd.to_numeric(raw_bat[col], errors='coerce').fillna(0)
 raw_bat['Balls_Faced'] = np.where(raw_bat['SR'] > 0, (raw_bat['Runs'] / raw_bat['SR']) * 100, 0)
@@ -155,7 +161,7 @@ agg_bat = raw_bat.groupby('Player').agg(
     Inns=('Inns', 'sum'), Runs_bat=('Runs', 'sum'), Balls_Faced=('Balls_Faced', 'sum'), Dismissals=('Dismissals', 'sum')
 ).reset_index()
 
-# Aggregate Bowling
+# Aggregate Bowling (This squashes duplicates into 1 row)
 for col in ['Runs', 'Wkts']:
     raw_bowl[col] = pd.to_numeric(raw_bowl.get(col, 0), errors='coerce').fillna(0)
 raw_bowl['Balls_Bowled'] = raw_bowl['Overs'].apply(overs_to_balls)
@@ -164,13 +170,18 @@ agg_bowl = raw_bowl.groupby('Player').agg(
     Balls_Bowled=('Balls_Bowled', 'sum'), Runs_bowl=('Runs', 'sum'), Wkts=('Wkts', 'sum')
 ).reset_index()
 
-# Merge Disciplines
+# Combine Disciplines (Final single row per player)
 final_df = pd.merge(agg_bat, agg_bowl, on='Player', how='outer').fillna(0)
 valid = final_df[(final_df['Balls_Faced'] >= 12) | (final_df['Balls_Bowled'] >= 18)].copy()
 
+# Calculate actual merged metrics for display
 valid['SR_bat'] = np.where(valid['Balls_Faced'] > 0, (valid['Runs_bat'] / valid['Balls_Faced']) * 100, 0)
 valid['Econ'] = np.where(valid['Balls_Bowled'] > 0, (valid['Runs_bowl'] / valid['Balls_Bowled']) * 6, 999)
+valid['Bat Avg'] = np.where(valid['Dismissals'] > 0, valid['Runs_bat'] / valid['Dismissals'], valid['Runs_bat'])
+valid['Bowl Avg'] = np.where(valid['Wkts'] > 0, valid['Runs_bowl'] / valid['Wkts'], 0)
+valid['Overs'] = valid['Balls_Bowled'].apply(format_overs)
 
+# --- SECTION 3: RATING ALGORITHM ---
 # Bayesian Smoothing Parameters
 mean_avg = valid['Runs_bat'].sum() / (valid['Dismissals'].sum() or 1)
 mean_sr = (valid['Runs_bat'].sum() / valid['Balls_Faced'].sum()) * 100
@@ -212,17 +223,22 @@ min_raw, max_raw = np.percentile(valid['Final_Raw'], 1), np.percentile(valid['Fi
 valid['Rating'] = ((valid['Final_Raw'] - min_raw) / (max_raw - min_raw)) * 20.0 + 10.0
 valid['Rating'] = valid['Rating'].clip(lower=10.0, upper=30.0).round(1)
 
-def format_stats(row):
-    if row['Role'] == 'Batter': return f"{int(row['Runs_bat'])} Runs (SR: {row['SR_bat']:.1f})"
-    elif row['Role'] == 'Bowler': return f"{int(row['Wkts'])} Wkts (Econ: {row['Econ']:.1f})"
-    else: return f"{int(row['Runs_bat'])} Runs, {int(row['Wkts'])} Wkts"
+# Format visual outputs
+valid['Bat Avg'] = valid['Bat Avg'].round(1)
+valid['SR_bat'] = valid['SR_bat'].round(1)
+valid['Econ'] = np.where(valid['Econ'] == 999, 0, valid['Econ']).round(2)
+valid['Bowl Avg'] = valid['Bowl Avg'].round(1)
 
-valid['Key Stats'] = valid.apply(format_stats, axis=1)
-
-output = valid[['Player', 'Role', 'Key Stats', 'Rating']].sort_values('Rating', ascending=False).reset_index(drop=True)
+display_cols = {
+    'Player': 'Player', 'Role': 'Role', 'Inns': 'Inns Batted', 'Runs_bat': 'Total Runs', 
+    'Bat Avg': 'Bat Avg', 'SR_bat': 'Bat SR', 'Overs': 'Overs Bowled', 
+    'Wkts': 'Total Wickets', 'Econ': 'Economy', 'Rating': 'Overall Rating'
+}
+output = valid[list(display_cols.keys())].rename(columns=display_cols)
+output = output.sort_values('Overall Rating', ascending=False).reset_index(drop=True)
 output.index = output.index + 1
 
-# --- SECTION 3: DRAFT BOARD ---
+# --- SECTION 4: LIVE DRAFT BOARD ---
 st.header("🏆 Live Draft Board")
 
 col1, col2 = st.columns(2)
