@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -331,11 +332,12 @@ with tab1:
 
         disp_df['Player'] = disp_df.apply(lambda r: f"{r['Player']} (C)" if r['Leadership'] == 'Captain' else (f"{r['Player']} (VC)" if r['Leadership'] == 'Vice Captain' else r['Player']), axis=1)
 
+        # Added the 3 individual AI Ratings to the master board view
         col_order = [
             'Player', 'Role', 'Tier', 'Pool Status',
             'Runs_bat', 'Bat Avg', 'SR_bat', 'Boundary_Pct',
             'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 'Extras_Rate',
-            'Total_Fielding', 'AI Rating'
+            'Total_Fielding', 'Bat_Rating', 'Bowl_Rating', 'Field_Rating', 'AI Rating'
         ] + auth_users + ['Avg Scout Score', 'Scout Override', 'Final Scout Rating', 'Draft Status']
         
         disp_df = disp_df[col_order].sort_values('AI Rating', ascending=False)
@@ -343,7 +345,8 @@ with tab1:
         rename_cols = {
             'Runs_bat': 'Runs', 'SR_bat': 'Bat SR', 'Boundary_Pct': 'Bound %',
             'Bowl Avg': 'Bowl Avg', 'Bowl SR': 'Bowl SR', 'Econ': 'Econ', 'Extras_Rate': 'Extras/Ov',
-            'Total_Fielding': 'Fielding'
+            'Total_Fielding': 'Fielding',
+            'Bat_Rating': 'Bat Rtg', 'Bowl_Rating': 'Bowl Rtg', 'Field_Rating': 'Field Rtg'
         }
         disp_df.rename(columns=rename_cols, inplace=True)
         disp_df = disp_df.set_index('Player')
@@ -352,6 +355,7 @@ with tab1:
             'Runs': '{:.0f}', 'Wkts': '{:.0f}', 'Fielding': '{:.0f}',
             'Bat Avg': '{:.2f}', 'Bat SR': '{:.1f}', 'Bound %': '{:.1f}%',
             'Bowl Avg': '{:.2f}', 'Bowl SR': '{:.1f}', 'Econ': '{:.2f}', 'Extras/Ov': '{:.2f}',
+            'Bat Rtg': '{:.1f}', 'Bowl Rtg': '{:.1f}', 'Field Rtg': '{:.1f}',
             'AI Rating': '{:.1f}', 'Avg Scout Score': '{:.1f}', 'Scout Override': '{:.1f}', 'Final Scout Rating': '{:.1f}'
         }
         for u in auth_users:
@@ -637,6 +641,8 @@ with tab5:
         val_fld = display_peer_slider(c_fld, f"Fielding Rating ({scout_player})", def_field, "Field_Rating")
         
         w = algo_weights
+        
+        # CORRECTED MATH: Pure 10-30 scale evaluation without AI standard deviation inflations
         if sel_role == 'Batter': 
             tot = w['wt_batter_bat'] + w['wt_batter_field'] or 1
             calc_final = (val_bat * (w['wt_batter_bat']/tot)) + (val_fld * (w['wt_batter_field']/tot))
@@ -645,8 +651,7 @@ with tab5:
             calc_final = (val_bowl * (w['wt_bowler_bowl']/tot)) + (val_fld * (w['wt_bowler_field']/tot))
         else: 
             tot = w['wt_ar_bat'] + w['wt_ar_bowl'] + w['wt_ar_field'] or 1
-            raw_ar = (val_bat * (w['wt_ar_bat']/tot)) + (val_bowl * (w['wt_ar_bowl']/tot)) + (val_fld * (w['wt_ar_field']/tot))
-            calc_final = min(30.0, raw_ar * w['ar_multiplier'])
+            calc_final = (val_bat * (w['wt_ar_bat']/tot)) + (val_bowl * (w['wt_ar_bowl']/tot)) + (val_fld * (w['wt_ar_field']/tot))
             
         col1, col2 = st.columns([3, 1])
         col1.info(f"**Calculated Final Scout Rating:** {calc_final:.1f} / 30.0")
@@ -666,7 +671,7 @@ with tab5:
         st.markdown("---")
         st.markdown("### 📋 2. Mass Scouting & Overrides Table")
         st.write("Edit final scores directly in the table. The **Peer** columns display the closest matching players (±1.5 pts) for Batting, Bowling, and Fielding respectively.")
-        st.caption("*(Note: 'My Final Score' is automatically calculated for you using the engine's standard weights when you click Save)*")
+        st.caption("*(Note: To prevent errors, 'My Final Score' visually updates immediately after you click Save Data.)*")
         
         def get_skill_peers(player_name, rating, skill_col):
             min_v, max_v = rating - 1.5, rating + 1.5
@@ -728,11 +733,13 @@ with tab5:
                 my_bowl = row['My Bowl']
                 my_fld = row['My Field']
                 
-                # If they filled out any of the inputs, process their data and auto-calculate the final score
+                p_match = master_df[master_df['Player'] == p_name].iloc[0]
+                
+                # CORRECTED MATH: Gracefully default to AI Rating if field is skipped
                 if pd.notna(my_bat) or pd.notna(my_bowl) or pd.notna(my_fld):
-                    v_bat = float(my_bat) if pd.notna(my_bat) else 20.0
-                    v_bowl = float(my_bowl) if pd.notna(my_bowl) else 20.0
-                    v_fld = float(my_fld) if pd.notna(my_fld) else 20.0
+                    v_bat = float(my_bat) if pd.notna(my_bat) else float(p_match['Bat_Rating'])
+                    v_bowl = float(my_bowl) if pd.notna(my_bowl) else float(p_match['Bowl_Rating'])
+                    v_fld = float(my_fld) if pd.notna(my_fld) else float(p_match['Field_Rating'])
                     
                     if role == 'Batter': 
                         tot = w['wt_batter_bat'] + w['wt_batter_field'] or 1
@@ -742,8 +749,7 @@ with tab5:
                         my_fin = (v_bowl * (w['wt_bowler_bowl']/tot)) + (v_fld * (w['wt_bowler_field']/tot))
                     else: 
                         tot = w['wt_ar_bat'] + w['wt_ar_bowl'] + w['wt_ar_field'] or 1
-                        raw_ar = (v_bat * (w['wt_ar_bat']/tot)) + (v_bowl * (w['wt_ar_bowl']/tot)) + (v_fld * (w['wt_ar_field']/tot))
-                        my_fin = min(30.0, raw_ar * w['ar_multiplier'])
+                        my_fin = (v_bat * (w['wt_ar_bat']/tot)) + (v_bowl * (w['wt_ar_bowl']/tot)) + (v_fld * (w['wt_ar_field']/tot))
 
                     if p_name not in human_ratings: human_ratings[p_name] = {}
                     
