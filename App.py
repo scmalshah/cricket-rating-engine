@@ -204,8 +204,14 @@ master_df = calculate_ratings(raw_bat_cache, raw_bowl_cache, raw_field_cache, sa
 
 if not master_df.empty:
     def get_avg_scout(player_name):
-        scores = human_ratings.get(player_name, {}).values()
-        return round(sum(scores)/len(scores), 1) if scores else None
+        evals = human_ratings.get(player_name, {})
+        if not evals: return None
+        total, count = 0, 0
+        for e, data in evals.items():
+            if isinstance(data, dict) and "Final" in data:
+                total += data["Final"]
+                count += 1
+        return round(total / count, 1) if count > 0 else None
     
     master_df['Avg Scout Score'] = master_df['Player'].apply(get_avg_scout)
     master_df['Draft Status'] = master_df['Player'].apply(lambda x: draft_state.get(x, "Available"))
@@ -302,11 +308,16 @@ with tab3:
                 st.markdown(f"**Fielding Dismissals:** {int(p_data['Total_Fielding'])}")
                 
                 st.markdown("---")
-                st.markdown("**Committee Scores:**")
+                st.markdown("**Committee Score Breakdown:**")
                 scores = human_ratings.get(selected_player, {})
-                if not scores: st.write("*No committee reviews yet.*")
-                for evaluator, score in scores.items():
-                    st.write(f"- {evaluator}: {score:.1f}/10")
+                if not scores: 
+                    st.write("*No committee reviews yet.*")
+                else:
+                    for evaluator, data in scores.items():
+                        if isinstance(data, dict):
+                            st.write(f"- **{evaluator} ({data.get('Final', 0):.1f})** | *{data.get('Role')} | Bat: {data.get('Bat')}, Bowl: {data.get('Bowl')}, Field: {data.get('Field')}*")
+                        else:
+                            st.write(f"- **{evaluator}**: Legacy Score Ignored")
 
             with pc2:
                 categories = ['Batting Volume', 'Strike Rate', 'Wicket Taking', 'Economy (Reversed)', 'Fielding Impact']
@@ -329,21 +340,58 @@ with tab4:
     if master_df.empty:
         st.info("Data required.")
     else:
-        st.subheader("📝 Individual Committee Ratings")
-        st.write("Authorized users can assign their personal scouting scores (1-10) to players.")
+        st.subheader("📝 Committee Scouting (10-30 Scale)")
+        st.write("Rate the player's disciplines from 10.0 to 30.0. The engine will calculate the final score automatically based on the selected role using the BPL methodology.")
         
         sc1, sc2 = st.columns(2)
         evaluator = sc1.selectbox("Select Your Name", auth_users)
         scout_player = sc2.selectbox("Select Player to Rate", master_df.sort_values('Player')['Player'])
         
-        current_score = human_ratings.get(scout_player, {}).get(evaluator, 5.0)
-        new_score = st.slider("Assign Rating (1 = Poor, 10 = Elite)", 1.0, 10.0, float(current_score), step=0.5)
+        # Pull existing ratings or defaults
+        existing_data = human_ratings.get(scout_player, {}).get(evaluator, {})
+        if not isinstance(existing_data, dict): existing_data = {}
+        
+        # Default role should match the AI's determined role for convenience
+        engine_role = "Batter"
+        if scout_player in master_df['Player'].values:
+            engine_role = master_df[master_df['Player'] == scout_player].iloc[0]['Role']
+            
+        def_role = existing_data.get("Role", engine_role)
+        def_bat = existing_data.get("Bat", 20.0)
+        def_bowl = existing_data.get("Bowl", 20.0)
+        def_field = existing_data.get("Field", 20.0)
+        
+        sel_role = st.selectbox("Assign Player Role", ["Batter", "Bowler", "All-Rounder"], index=["Batter", "Bowler", "All-Rounder"].index(def_role))
+        
+        st.markdown("##### Assign Skill Ratings")
+        c_bat, c_bowl, c_fld = st.columns(3)
+        with c_bat: val_bat = st.slider("Batting Rating", 10.0, 30.0, float(def_bat), step=0.5)
+        with c_bowl: val_bowl = st.slider("Bowling Rating", 10.0, 30.0, float(def_bowl), step=0.5)
+        with c_fld: val_fld = st.slider("Fielding Rating", 10.0, 30.0, float(def_field), step=0.5)
+        
+        # Mathematical Calculation mirroring the AI Engine
+        if sel_role == 'Batter': 
+            calc_final = (val_bat * 0.85) + (val_fld * 0.15)
+        elif sel_role == 'Bowler': 
+            calc_final = (val_bowl * 0.85) + (val_fld * 0.15)
+        else: 
+            # All-Rounder calculation applies the 1.3x multiplier but strictly caps at 30.0
+            raw_ar = (val_bat * 0.425) + (val_bowl * 0.425) + (val_fld * 0.15)
+            calc_final = min(30.0, raw_ar * 1.3)
+            
+        st.info(f"**Calculated Final Scout Rating:** {calc_final:.1f} / 30.0")
         
         if st.button("Save Rating", type="primary"):
             if scout_player not in human_ratings: human_ratings[scout_player] = {}
-            human_ratings[scout_player][evaluator] = new_score
+            human_ratings[scout_player][evaluator] = {
+                "Role": sel_role,
+                "Bat": val_bat,
+                "Bowl": val_bowl,
+                "Field": val_fld,
+                "Final": float(round(calc_final, 1))
+            }
             save_json(RATINGS_FILE, human_ratings)
-            st.success(f"Score saved for {scout_player}!")
+            st.success(f"Score detailed breakdown saved for {scout_player}!")
             st.rerun()
 
 # --- TAB 5: METHODOLOGY ---
