@@ -4,256 +4,292 @@ import numpy as np
 import os
 import json
 import re
+import plotly.graph_objects as go
+import plotly.express as px
 
-st.set_page_config(page_title="🏏 Cricket Draft Board & Rating Engine", layout="wide")
+st.set_page_config(page_title="Tigers Cricket Club - Draft Engine", layout="wide", page_icon="🏏")
 
+# --- FILE PATHS ---
 DATA_FILE = "current_stats.xlsx"
 MAPPING_FILE = "name_mapping.json"
+DRAFT_FILE = "draft_state.json"
+RATINGS_FILE = "human_ratings.json"
+USERS_FILE = "authorized_users.json"
 
 # --- HELPER FUNCTIONS ---
-def clean_col_name(c):
-    return str(c).replace('\xa0', '').replace("'", "").strip()
-
+def clean_col_name(c): return str(c).replace('\xa0', '').replace("'", "").strip()
 def clean_prefix(name):
     if not isinstance(name, str): return ""
-    # Strip spaces and \xa0, then reduce multiple spaces to a single space
     name = re.sub(' +', ' ', name.replace('\xa0', ' ').strip())
-    # Remove capital letter organizational prefixes (e.g., PR, DI)
-    if len(name) > 2 and name[:2].isupper():
-        prefix = name[:2]
-        rest = name[2:]
-        if rest[:2].upper() == prefix:
-            return rest.strip()
+    if len(name) > 2 and name[:2].isupper() and name[2:4].upper() == name[:2]:
+        return name[2:].strip()
     return name
-
 def overs_to_balls(overs):
     if pd.isna(overs): return 0
-    try:
-        o = float(overs)
-        complete = int(o)
-        balls = round((o - complete) * 10)
-        return complete * 6 + balls
-    except:
-        return 0
+    try: return int(float(overs)) * 6 + round((float(overs) - int(float(overs))) * 10)
+    except: return 0
+def format_overs(balls): return float(f"{int(balls) // 6}.{int(balls) % 6}")
 
-def format_overs(balls):
-    balls = int(balls)
-    return float(f"{balls // 6}.{balls % 6}")
-
-def load_saved_mappings():
-    if os.path.exists(MAPPING_FILE):
+def load_json(filepath, default_val):
+    if os.path.exists(filepath):
         try:
-            with open(MAPPING_FILE, "r") as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
+            with open(filepath, "r") as f: return json.load(f)
+        except: return default_val
+    return default_val
 
-def save_mappings_to_disk(mapping_dict):
-    with open(MAPPING_FILE, "w") as f:
-        json.dump(mapping_dict, f, indent=2)
+def save_json(filepath, data):
+    with open(filepath, "w") as f: json.dump(data, f, indent=2)
 
-# --- APP HEADER ---
-st.title("🏏 Proprietary Player Rating Engine")
-st.markdown("Global Draft Board & Rating System. Uploaded stats and player mappings persist permanently across sessions.")
+# --- LOAD STATES ---
+saved_mapping = load_json(MAPPING_FILE, {})
+draft_state = load_json(DRAFT_FILE, {}) # {PlayerName: "Team 1"}
+human_ratings = load_json(RATINGS_FILE, {}) # {PlayerName: {EvaluatorName: Rating}}
+auth_users = load_json(USERS_FILE, ["Admin", "Captain 1", "Captain 2"])
+TEAMS = ["Available", "Team 1", "Team 2", "Team 3", "Team 4", "Team 5"]
 
-# --- SIDEBAR: ADMIN DATA CONTROLS ---
-with st.sidebar:
-    st.header("⚙️ Admin Controls")
-    uploaded_file = st.file_uploader("Upload / Replace Excel Stats (.xlsx)", type=["xlsx"])
+# --- HEADER ---
+st.title("🏏 Tigers Cricket Club Draft Engine (Est. 2026)")
+st.markdown("Advanced AI Rating, Live Roster Management, and Committee Scouting.")
+
+# --- DATA PROCESSING ENGINE ---
+@st.cache_data
+def load_and_process_data(mapping):
+    if not os.path.exists(DATA_FILE): return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    xls = pd.ExcelFile(DATA_FILE)
+    bat_dfs, bowl_dfs = [], []
+    for s in xls.sheet_names:
+        header_idx = 1 if 'practice' in s.lower() else 0
+        df = pd.read_excel(xls, sheet_name=s, header=header_idx)
+        df.columns = [clean_col_name(c) for c in df.columns]
+        if 'Player' in df.columns:
+            df['Player'] = df['Player'].apply(clean_prefix)
+            if 'bat' in s.lower(): bat_dfs.append(df)
+            elif 'bowl' in s.lower(): bowl_dfs.append(df)
+
+    raw_bat = pd.concat(bat_dfs, ignore_index=True) if bat_dfs else pd.DataFrame()
+    raw_bowl = pd.concat(bowl_dfs, ignore_index=True) if bowl_dfs else pd.DataFrame()
     
-    if uploaded_file is not None:
-        with open(DATA_FILE, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-        st.success("✅ New Excel stats uploaded! (Your saved name mappings remain intact)")
-        st.rerun()
+    if raw_bat.empty and raw_bowl.empty: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    st.markdown("---")
-    st.subheader("Data Reset")
-    if st.button("🗑️ Clear Uploaded Stats File"):
-        if os.path.exists(DATA_FILE):
-            os.remove(DATA_FILE)
-            st.warning("Stats file removed.")
-            st.rerun()
-            
-    if st.button("⚠️ Reset All Name Mappings"):
-        if os.path.exists(MAPPING_FILE):
-            os.remove(MAPPING_FILE)
-            st.warning("All saved alias mappings have been deleted.")
-            st.rerun()
+    if not raw_bat.empty: raw_bat['Player'] = raw_bat['Player'].map(mapping).fillna(raw_bat['Player'])
+    if not raw_bowl.empty: raw_bowl['Player'] = raw_bowl['Player'].map(mapping).fillna(raw_bowl['Player'])
 
-# --- CHECK DATASET AVAILABILITY ---
-if not os.path.exists(DATA_FILE):
-    st.info("👋 No stats file currently found on the server. Please upload an Excel file via the sidebar to generate rankings.")
-    st.stop()
+    for col in ['Runs', 'SR', 'Inns', 'NO']:
+        raw_bat[col] = pd.to_numeric(raw_bat.get(col, 0), errors='coerce').fillna(0)
+    raw_bat['Balls_Faced'] = np.where(raw_bat['SR'] > 0, (raw_bat['Runs'] / raw_bat['SR']) * 100, 0)
+    raw_bat['Dismissals'] = (raw_bat['Inns'] - raw_bat['NO']).clip(lower=0)
+    agg_bat = raw_bat.groupby('Player').agg(Inns=('Inns', 'sum'), Runs_bat=('Runs', 'sum'), Balls_Faced=('Balls_Faced', 'sum'), Dismissals=('Dismissals', 'sum')).reset_index()
 
-# --- LOAD DATASET FROM DISK ---
-xls = pd.ExcelFile(DATA_FILE)
-bat_sheets = [s for s in xls.sheet_names if 'batting' in s.lower() or 'bat' in s.lower()]
-bowl_sheets = [s for s in xls.sheet_names if 'bowling' in s.lower() or 'bowl' in s.lower()]
+    for col in ['Runs', 'Wkts', 'Overs']:
+        raw_bowl[col] = pd.to_numeric(raw_bowl.get(col, 0), errors='coerce').fillna(0)
+    raw_bowl['Balls_Bowled'] = raw_bowl['Overs'].apply(overs_to_balls)
+    agg_bowl = raw_bowl.groupby('Player').agg(Balls_Bowled=('Balls_Bowled', 'sum'), Runs_bowl=('Runs', 'sum'), Wkts=('Wkts', 'sum')).reset_index()
 
-bat_dfs, bowl_dfs = [], []
-for s in bat_sheets:
-    header_idx = 1 if 'practice' in s.lower() else 0
-    df = pd.read_excel(xls, sheet_name=s, header=header_idx)
-    df.columns = [clean_col_name(c) for c in df.columns]
-    if 'Player' in df.columns:
-        df['Player'] = df['Player'].apply(clean_prefix)
-        bat_dfs.append(df)
+    valid = pd.merge(agg_bat, agg_bowl, on='Player', how='outer').fillna(0)
+    valid = valid[(valid['Balls_Faced'] >= 12) | (valid['Balls_Bowled'] >= 18)].copy()
+
+    valid['SR_bat'] = np.where(valid['Balls_Faced'] > 0, (valid['Runs_bat'] / valid['Balls_Faced']) * 100, 0)
+    valid['Econ'] = np.where(valid['Balls_Bowled'] > 0, (valid['Runs_bowl'] / valid['Balls_Bowled']) * 6, 999)
+    valid['Bat Avg'] = np.where(valid['Dismissals'] > 0, valid['Runs_bat'] / valid['Dismissals'], valid['Runs_bat'])
+    valid['Bowl Avg'] = np.where(valid['Wkts'] > 0, valid['Runs_bowl'] / valid['Wkts'], 0)
+    valid['Overs'] = valid['Balls_Bowled'].apply(format_overs)
+
+    mean_avg = valid['Runs_bat'].sum() / (valid['Dismissals'].sum() or 1)
+    valid['Sm_Avg'] = (valid['Runs_bat'] + (mean_avg * 3)) / (valid['Dismissals'] + 3)
+    valid['Sm_SR'] = ((valid['Runs_bat'] + ((valid['Runs_bat'].sum() / valid['Balls_Faced'].sum() * 100) / 100 * 30)) / (valid['Balls_Faced'] + 30)) * 100
+    valid['Sm_Econ'] = ((valid['Runs_bowl'] + ((valid['Runs_bowl'].sum() / valid['Balls_Bowled'].sum() * 6) / 6 * 30)) / (valid['Balls_Bowled'] + 30)) * 6
+    valid['Sm_Avg_bowl'] = (valid['Runs_bowl'] + ((valid['Runs_bowl'].sum() / valid['Balls_Bowled'].sum() * 6) * 5)) / (valid['Wkts'] + 5)
+
+    z_runs = (valid['Runs_bat'] - valid['Runs_bat'].mean()) / valid['Runs_bat'].std()
+    z_avg = (valid['Sm_Avg'] - valid['Sm_Avg'].mean()) / valid['Sm_Avg'].std()
+    z_sr = (valid['Sm_SR'] - valid['Sm_SR'].mean()) / valid['Sm_SR'].std()
+    valid['Bat_Score'] = z_runs * 0.3 + z_avg * 0.4 + z_sr * 0.3
+
+    z_wkts = (valid['Wkts'] - valid['Wkts'].mean()) / valid['Wkts'].std()
+    z_econ = (valid['Sm_Econ'].mean() - valid['Sm_Econ']) / valid['Sm_Econ'].std()
+    z_avg_bowl = (valid['Sm_Avg_bowl'].mean() - valid['Sm_Avg_bowl']) / valid['Sm_Avg_bowl'].std()
+    valid['Bowl_Score'] = z_wkts * 0.4 + z_econ * 0.35 + z_avg_bowl * 0.25
+
+    valid['Role'] = valid.apply(lambda r: 'All-Rounder' if r['Balls_Faced'] >= 15 and r['Balls_Bowled'] >= 18 else ('Bowler' if r['Balls_Bowled'] >= 18 else 'Batter'), axis=1)
+    valid['Final_Raw'] = valid.apply(lambda r: r['Bat_Score'] if r['Role'] == 'Batter' else (r['Bowl_Score'] if r['Role'] == 'Bowler' else (r['Bat_Score'] * 0.5 + r['Bowl_Score'] * 0.5) * 1.3), axis=1)
+
+    min_raw, max_raw = np.percentile(valid['Final_Raw'], 1), np.percentile(valid['Final_Raw'], 99)
+    valid['AI Rating'] = ((valid['Final_Raw'] - min_raw) / (max_raw - min_raw)) * 20.0 + 10.0
+    valid['AI Rating'] = valid['AI Rating'].clip(lower=10.0, upper=30.0).round(1)
+
+    # Tiers
+    valid['Tier'] = pd.cut(valid['AI Rating'], bins=[0, 18, 23, 27, 31], labels=["Bronze", "Silver", "Gold", "Platinum"])
+    
+    return valid, raw_bat, raw_bowl
+
+master_df, raw_bat, raw_bowl = load_and_process_data(saved_mapping)
+
+if master_df.empty:
+    st.info("👋 Welcome! Please navigate to the '⚙️ Admin' tab and upload your Excel stats file to initialize the engine.")
+else:
+    # Blend Human Ratings
+    def get_avg_scout(player_name):
+        scores = human_ratings.get(player_name, {}).values()
+        return round(sum(scores)/len(scores), 1) if scores else None
+    
+    master_df['Avg Scout Score'] = master_df['Player'].apply(get_avg_scout)
+    master_df['Draft Status'] = master_df['Player'].apply(lambda x: draft_state.get(x, "Available"))
+    
+    # --- UI TABS ---
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["🏆 Live Draft Board", "📊 Team Analytics", "🕸️ Player Profiles", "📝 Committee Scouting", "⚙️ Admin & Data"])
+
+    # --- TAB 1: DRAFT BOARD ---
+    with tab1:
+        st.subheader("Live Interactive Draft Board")
         
-for s in bowl_sheets:
-    header_idx = 1 if 'practice' in s.lower() else 0
-    df = pd.read_excel(xls, sheet_name=s, header=header_idx)
-    df.columns = [clean_col_name(c) for c in df.columns]
-    if 'Player' in df.columns:
-        df['Player'] = df['Player'].apply(clean_prefix)
-        bowl_dfs.append(df)
+        # KPIs
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total Players", len(master_df))
+        c2.metric("Available Players", len(master_df[master_df['Draft Status'] == "Available"]))
+        c3.metric("Platinum Tier", len(master_df[master_df['Tier'] == "Platinum"]))
+        c4.metric("Avg AI Rating", round(master_df['AI Rating'].mean(), 1))
 
-raw_bat = pd.concat(bat_dfs, ignore_index=True) if bat_dfs else pd.DataFrame()
-raw_bowl = pd.concat(bowl_dfs, ignore_index=True) if bowl_dfs else pd.DataFrame()
+        # Filters
+        f1, f2 = st.columns(2)
+        role_f = f1.selectbox("Filter Role", ["All", "Batter", "Bowler", "All-Rounder"])
+        status_f = f2.selectbox("Filter Status", ["Available Only", "All Players"] + [t for t in TEAMS if t != "Available"])
+        
+        disp_df = master_df.copy()
+        if role_f != "All": disp_df = disp_df[disp_df['Role'] == role_f]
+        if status_f == "Available Only": disp_df = disp_df[disp_df['Draft Status'] == "Available"]
+        elif status_f != "All Players": disp_df = disp_df[disp_df['Draft Status'] == status_f]
 
-# Collect all current unique names in the dataset
-current_names = set()
-if not raw_bat.empty: current_names.update(raw_bat['Player'].dropna().unique())
-if not raw_bowl.empty: current_names.update(raw_bowl['Player'].dropna().unique())
+        # Formatting for Display
+        disp_df = disp_df[['Player', 'Role', 'Tier', 'Runs_bat', 'Wkts', 'Econ', 'AI Rating', 'Avg Scout Score', 'Draft Status']].sort_values('AI Rating', ascending=False)
+        disp_df.columns = ['Player', 'Role', 'Tier', 'Runs', 'Wkts', 'Econ', 'AI Rating', 'Scout Rating', 'Draft Status']
+        
+        # Color coding Rating
+        styled_df = disp_df.style.background_gradient(subset=['AI Rating'], cmap='RdYlGn', vmin=10, vmax=30)
+        st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
-# Load persistent mappings from disk
-saved_mapping = load_saved_mappings()
+    # --- TAB 2: TEAM ANALYTICS ---
+    with tab2:
+        st.subheader("Live Team Balance Analytics")
+        drafted = master_df[master_df['Draft Status'] != "Available"]
+        if drafted.empty:
+            st.info("No players drafted yet. Update Draft Status in the Admin tab.")
+        else:
+            team_stats = drafted.groupby('Draft Status').agg(
+                Players=('Player', 'count'),
+                Total_AI_Rating=('AI Rating', 'sum'),
+                Avg_AI_Rating=('AI Rating', 'mean'),
+                Total_Runs=('Runs_bat', 'sum'),
+                Total_Wkts=('Wkts', 'sum')
+            ).reset_index()
+            
+            c1, c2 = st.columns(2)
+            fig1 = px.bar(team_stats, x='Draft Status', y='Avg_AI_Rating', title="Average Team Rating", color='Draft Status')
+            c1.plotly_chart(fig1, use_container_width=True)
+            
+            fig2 = px.bar(team_stats, x='Draft Status', y='Total_AI_Rating', title="Total Team Power Score", color='Draft Status')
+            c2.plotly_chart(fig2, use_container_width=True)
+            
+            st.dataframe(team_stats.style.format({'Avg_AI_Rating': "{:.1f}"}), use_container_width=True)
 
-# Update mapping dict: preserve existing mappings, default new names to themselves
-updated_mapping_records = []
-for name in sorted(list(current_names)):
-    merged_name = saved_mapping.get(name, name)
-    updated_mapping_records.append({
-        "Original Name": name,
-        "Merged Name": merged_name
-    })
+    # --- TAB 3: PLAYER PROFILES ---
+    with tab3:
+        st.subheader("Advanced Player Scouting Profiles")
+        selected_player = st.selectbox("Search Player", master_df.sort_values('AI Rating', ascending=False)['Player'])
+        
+        if selected_player:
+            p_data = master_df[master_df['Player'] == selected_player].iloc[0]
+            
+            pc1, pc2 = st.columns([1, 2])
+            with pc1:
+                st.markdown(f"### {p_data['Player']}")
+                st.markdown(f"**Role:** {p_data['Role']} | **Tier:** {p_data['Tier']}")
+                st.markdown(f"**AI Rating:** {p_data['AI Rating']}/30.0")
+                st.markdown(f"**Drafted To:** {p_data['Draft Status']}")
+                st.markdown("---")
+                st.markdown(f"**Total Runs:** {int(p_data['Runs_bat'])} *(Avg: {p_data['Bat Avg']:.1f}, SR: {p_data['SR_bat']:.1f})*")
+                st.markdown(f"**Total Wkts:** {int(p_data['Wkts'])} *(Econ: {p_data['Econ']:.1f}, Overs: {p_data['Overs']})*")
+                
+                # Show individual human ratings
+                st.markdown("---")
+                st.markdown("**Committee Scores:**")
+                scores = human_ratings.get(selected_player, {})
+                if not scores: st.write("*No committee reviews yet.*")
+                for evaluator, score in scores.items():
+                    st.write(f"- {evaluator}: {score}/10")
 
-mapping_df = pd.DataFrame(updated_mapping_records)
+            with pc2:
+                # Radar Chart Logic
+                categories = ['Batting Volume', 'Strike Rate', 'Wicket Taking', 'Economy (Reversed)']
+                
+                # Normalize values purely for radar visualization (0 to 1 scale)
+                r_bat = (p_data['Bat_Score'] - master_df['Bat_Score'].min()) / (master_df['Bat_Score'].max() - master_df['Bat_Score'].min() + 0.01)
+                r_sr = (p_data['SR_bat'] - master_df['SR_bat'].min()) / (master_df['SR_bat'].max() - master_df['SR_bat'].min() + 0.01)
+                r_bowl = (p_data['Bowl_Score'] - master_df['Bowl_Score'].min()) / (master_df['Bowl_Score'].max() - master_df['Bowl_Score'].min() + 0.01)
+                # Reverse Econ for radar (lower econ = higher score on graph)
+                r_econ = 1 - ((p_data['Econ'] - master_df['Econ'].min()) / (master_df['Econ'].max() - master_df['Econ'].min() + 0.01))
+                if p_data['Econ'] == 0 or p_data['Econ'] == 999: r_econ = 0
+                
+                fig = go.Figure()
+                fig.add_trace(go.Scatterpolar(
+                    r=[r_bat, r_sr, r_bowl, r_econ, r_bat],
+                    theta=categories + [categories[0]],
+                    fill='toself', name=selected_player, line_color='orange'
+                ))
+                fig.update_layout(polar=dict(radialaxis=dict(visible=False, range=[0, 1])), showlegend=False, title="Skill Polygon")
+                st.plotly_chart(fig, use_container_width=True)
 
-# --- SECTION 1: NAME MERGING & MAPPING ---
-with st.expander("🛠️ Player Name Aliases & Merge Tool (Saved Permanently)", expanded=False):
-    st.write("Edit the **'Merged Name'** column to merge aliases. These persist across all Excel uploads until manually reset.")
-    
-    edited_mapping = st.data_editor(mapping_df, use_container_width=True, hide_index=True, key="mapping_editor")
-    
-    if st.button("💾 Save Player Mappings Permanently", type="primary"):
-        new_map = dict(zip(edited_mapping["Original Name"], edited_mapping["Merged Name"]))
-        saved_mapping.update(new_map)
-        save_mappings_to_disk(saved_mapping)
-        st.success("✅ Mappings saved permanently!")
-        st.rerun()
+    # --- TAB 4: COMMITTEE SCOUTING ---
+    with tab4:
+        st.subheader("📝 Individual Committee Ratings")
+        st.write("Authorized users can assign their personal scouting scores (1-10) to players. This helps captains evaluate intangibles.")
+        
+        sc1, sc2 = st.columns(2)
+        evaluator = sc1.selectbox("Select Your Name", auth_users)
+        scout_player = sc2.selectbox("Select Player to Rate", master_df.sort_values('Player')['Player'])
+        
+        current_score = human_ratings.get(scout_player, {}).get(evaluator, 5)
+        new_score = st.slider("Assign Rating (1 = Poor, 10 = Elite)", 1, 10, current_score)
+        
+        if st.button("Save Rating", type="primary"):
+            if scout_player not in human_ratings: human_ratings[scout_player] = {}
+            human_ratings[scout_player][evaluator] = new_score
+            save_json(RATINGS_FILE, human_ratings)
+            st.success(f"Score saved for {scout_player}!")
+            st.rerun()
 
-# --- SECTION 2: MERGE STATS (INTO A SINGLE ROW) ---
-# Apply the persistent name mappings BEFORE grouping
-active_map = dict(zip(edited_mapping["Original Name"], edited_mapping["Merged Name"]))
+    # --- TAB 5: ADMIN & DATA ---
+    with tab5:
+        st.subheader("⚙️ System Management")
+        
+        ac1, ac2 = st.columns(2)
+        with ac1:
+            st.markdown("**1. Live Draft Management**")
+            st.write("Assign players to teams to update the analytics tab.")
+            draft_df = pd.DataFrame({"Player": master_df['Player'], "Draft Status": master_df['Draft Status']})
+            edited_draft = st.data_editor(draft_df, column_config={"Draft Status": st.column_config.SelectboxColumn(options=TEAMS)}, hide_index=True, use_container_width=True)
+            if st.button("💾 Save Draft Rosters"):
+                new_draft = dict(zip(edited_draft["Player"], edited_draft["Draft Status"]))
+                save_json(DRAFT_FILE, new_draft)
+                st.success("Draft updated!")
+                st.rerun()
 
-if not raw_bat.empty: raw_bat['Player'] = raw_bat['Player'].map(active_map).fillna(raw_bat['Player'])
-if not raw_bowl.empty: raw_bowl['Player'] = raw_bowl['Player'].map(active_map).fillna(raw_bowl['Player'])
-
-# Aggregate Batting (This squashes duplicates into 1 row)
-for col in ['Runs', 'SR', 'Inns', 'NO']:
-    raw_bat[col] = pd.to_numeric(raw_bat[col], errors='coerce').fillna(0)
-raw_bat['Balls_Faced'] = np.where(raw_bat['SR'] > 0, (raw_bat['Runs'] / raw_bat['SR']) * 100, 0)
-raw_bat['Dismissals'] = (raw_bat['Inns'] - raw_bat['NO']).clip(lower=0)
-
-agg_bat = raw_bat.groupby('Player').agg(
-    Inns=('Inns', 'sum'), Runs_bat=('Runs', 'sum'), Balls_Faced=('Balls_Faced', 'sum'), Dismissals=('Dismissals', 'sum')
-).reset_index()
-
-# Aggregate Bowling (This squashes duplicates into 1 row)
-for col in ['Runs', 'Wkts']:
-    raw_bowl[col] = pd.to_numeric(raw_bowl.get(col, 0), errors='coerce').fillna(0)
-raw_bowl['Balls_Bowled'] = raw_bowl['Overs'].apply(overs_to_balls)
-
-agg_bowl = raw_bowl.groupby('Player').agg(
-    Balls_Bowled=('Balls_Bowled', 'sum'), Runs_bowl=('Runs', 'sum'), Wkts=('Wkts', 'sum')
-).reset_index()
-
-# Combine Disciplines (Final single row per player)
-final_df = pd.merge(agg_bat, agg_bowl, on='Player', how='outer').fillna(0)
-valid = final_df[(final_df['Balls_Faced'] >= 12) | (final_df['Balls_Bowled'] >= 18)].copy()
-
-# Calculate actual merged metrics for display
-valid['SR_bat'] = np.where(valid['Balls_Faced'] > 0, (valid['Runs_bat'] / valid['Balls_Faced']) * 100, 0)
-valid['Econ'] = np.where(valid['Balls_Bowled'] > 0, (valid['Runs_bowl'] / valid['Balls_Bowled']) * 6, 999)
-valid['Bat Avg'] = np.where(valid['Dismissals'] > 0, valid['Runs_bat'] / valid['Dismissals'], valid['Runs_bat'])
-valid['Bowl Avg'] = np.where(valid['Wkts'] > 0, valid['Runs_bowl'] / valid['Wkts'], 0)
-valid['Overs'] = valid['Balls_Bowled'].apply(format_overs)
-
-# --- SECTION 3: RATING ALGORITHM ---
-# Bayesian Smoothing Parameters
-mean_avg = valid['Runs_bat'].sum() / (valid['Dismissals'].sum() or 1)
-mean_sr = (valid['Runs_bat'].sum() / valid['Balls_Faced'].sum()) * 100
-mean_econ = (valid['Runs_bowl'].sum() / valid['Balls_Bowled'].sum()) * 6
-
-valid['Sm_Avg'] = (valid['Runs_bat'] + (mean_avg * 3)) / (valid['Dismissals'] + 3)
-valid['Sm_SR'] = ((valid['Runs_bat'] + (mean_sr / 100 * 30)) / (valid['Balls_Faced'] + 30)) * 100
-valid['Sm_Econ'] = ((valid['Runs_bowl'] + (mean_econ / 6 * 30)) / (valid['Balls_Bowled'] + 30)) * 6
-valid['Sm_Avg_bowl'] = (valid['Runs_bowl'] + (mean_econ * 5)) / (valid['Wkts'] + 5)
-
-# Standardized Z-Scores
-z_runs = (valid['Runs_bat'] - valid['Runs_bat'].mean()) / valid['Runs_bat'].std()
-z_avg = (valid['Sm_Avg'] - valid['Sm_Avg'].mean()) / valid['Sm_Avg'].std()
-z_sr = (valid['Sm_SR'] - valid['Sm_SR'].mean()) / valid['Sm_SR'].std()
-valid['Bat_Score'] = z_runs * 0.3 + z_avg * 0.4 + z_sr * 0.3
-
-z_wkts = (valid['Wkts'] - valid['Wkts'].mean()) / valid['Wkts'].std()
-z_econ = (valid['Sm_Econ'].mean() - valid['Sm_Econ']) / valid['Sm_Econ'].std()
-z_avg_bowl = (valid['Sm_Avg_bowl'].mean() - valid['Sm_Avg_bowl']) / valid['Sm_Avg_bowl'].std()
-valid['Bowl_Score'] = z_wkts * 0.4 + z_econ * 0.35 + z_avg_bowl * 0.25
-
-# Role Assignment
-def assign_role(row):
-    if row['Balls_Faced'] >= 15 and row['Balls_Bowled'] >= 18: return 'All-Rounder'
-    elif row['Balls_Bowled'] >= 18: return 'Bowler'
-    else: return 'Batter'
-
-valid['Role'] = valid.apply(assign_role, axis=1)
-
-def calc_final(row):
-    if row['Role'] == 'Batter': return row['Bat_Score']
-    elif row['Role'] == 'Bowler': return row['Bowl_Score']
-    else: return (row['Bat_Score'] * 0.5 + row['Bowl_Score'] * 0.5) * 1.3
-
-valid['Final_Raw'] = valid.apply(calc_final, axis=1)
-
-# Continuous 10.0 to 30.0 boundary mapping
-min_raw, max_raw = np.percentile(valid['Final_Raw'], 1), np.percentile(valid['Final_Raw'], 99)
-valid['Rating'] = ((valid['Final_Raw'] - min_raw) / (max_raw - min_raw)) * 20.0 + 10.0
-valid['Rating'] = valid['Rating'].clip(lower=10.0, upper=30.0).round(1)
-
-# Format visual outputs
-valid['Bat Avg'] = valid['Bat Avg'].round(1)
-valid['SR_bat'] = valid['SR_bat'].round(1)
-valid['Econ'] = np.where(valid['Econ'] == 999, 0, valid['Econ']).round(2)
-valid['Bowl Avg'] = valid['Bowl Avg'].round(1)
-
-display_cols = {
-    'Player': 'Player', 'Role': 'Role', 'Inns': 'Inns Batted', 'Runs_bat': 'Total Runs', 
-    'Bat Avg': 'Bat Avg', 'SR_bat': 'Bat SR', 'Overs': 'Overs Bowled', 
-    'Wkts': 'Total Wickets', 'Econ': 'Economy', 'Rating': 'Overall Rating'
-}
-output = valid[list(display_cols.keys())].rename(columns=display_cols)
-output = output.sort_values('Overall Rating', ascending=False).reset_index(drop=True)
-output.index = output.index + 1
-
-# --- SECTION 4: LIVE DRAFT BOARD ---
-st.header("🏆 Live Draft Board")
-
-col1, col2 = st.columns(2)
-with col1:
-    search_query = st.text_input("🔍 Search Player by Name")
-with col2:
-    role_filter = st.selectbox("🎯 Filter by Role", ["All", "Batter", "Bowler", "All-Rounder"])
-
-display_df = output.copy()
-if search_query:
-    display_df = display_df[display_df['Player'].str.contains(search_query, case=False, na=False)]
-if role_filter != "All":
-    display_df = display_df[display_df['Role'] == role_filter]
-
-st.dataframe(display_df, use_container_width=True)
-
-csv = display_df.to_csv(index=True).encode('utf-8')
-st.download_button(label="📥 Download Draft Board (CSV)", data=csv, file_name='cricket_ratings_live.csv', mime='text/csv')
+        with ac2:
+            st.markdown("**2. Authorized Committee Evaluators**")
+            users_text = st.text_area("List names (comma separated)", ", ".join(auth_users))
+            if st.button("Update Evaluators"):
+                new_users = [u.strip() for u in users_text.split(",")]
+                save_json(USERS_FILE, new_users)
+                st.success("Evaluators updated!")
+                st.rerun()
+            
+            st.markdown("---")
+            st.markdown("**3. Data File Upload**")
+            uploaded_file = st.file_uploader("Upload .xlsx", type=["xlsx"])
+            if uploaded_file:
+                with open(DATA_FILE, "wb") as f: f.write(uploaded_file.getbuffer())
+                st.success("Uploaded!")
+                st.rerun()
+                
+            if st.button("⚠️ Hard Reset Draft Status"):
+                save_json(DRAFT_FILE, {})
+                st.rerun()
