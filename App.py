@@ -68,17 +68,6 @@ def update_cap_settings():
         cw["team_budget"] = st.session_state.cap_budget
         save_json(WEIGHTS_FILE, cw)
 
-def extract_name(val):
-    v_str = str(val).strip()
-    if not v_str or pd.isna(val) or v_str == "None" or v_str == "--- CLEAR PICK ---": 
-        return ""
-    # Strip lock icons
-    v_str = v_str.replace("🔒 ", "").replace("🔒", "")
-    # Strip the rating appended in brackets
-    if " (" in v_str and v_str.endswith(")"):
-        return v_str.rsplit(" (", 1)[0].strip()
-    return v_str.strip()
-
 # --- LOAD STATES ---
 saved_mapping = load_json(MAPPING_FILE, {})
 mapping_changed = False
@@ -299,6 +288,17 @@ if not master_df.empty:
     master_df['Leadership'] = master_df['Player'].apply(lambda x: leadership_state.get(x, "None"))
     master_df['Pool Status'] = master_df['Player'].apply(lambda x: pool_state.get(x, "Team Player"))
 
+# --- BULLETPROOF DICTIONARY MAPPERS ---
+player_to_string_map = {}
+string_to_player_map = {"--- CLEAR PICK ---": "", "": ""}
+
+if not master_df.empty:
+    for _, row in master_df.iterrows():
+        # Clean formatting, no lock emojis!
+        disp_string = f"{row['Player']} ({row['AI Rating']:.1f})"
+        player_to_string_map[row['Player']] = disp_string
+        string_to_player_map[disp_string] = row['Player']
+
 # --- UI TABS ---
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["🏆 Live Draft Board", "🎯 Snake Draft Room", "📊 Team Analytics", "🕸️ Player Profiles", "📝 Committee Scouting", "🧠 Methodology", "⚙️ Admin & Data"])
 
@@ -416,134 +416,117 @@ with tab2:
 
         # --- EXCEL-STYLE INTERACTIVE DRAFT GRID ---
         st.markdown("#### 📋 Official Draft Board Grid")
-        st.write("Click an empty cell to pick an available player. The 🔒 icon indicates players who are already locked in from previous rounds.")
+        st.write("Click an empty cell to pick a player. If you need to remove someone, select **`--- CLEAR PICK ---`**.")
         
-        # Display Errors safely and clear immediately
+        # Display Errors safely
         if "draft_error" in st.session_state:
             st.error(st.session_state.draft_error)
             del st.session_state.draft_error
 
+        # 1. Initialize empty grid structure
         grid_df = pd.DataFrame(index=[f"Round {i+1}" for i in range(squad_size)])
         for t in valid_teams:
             grid_df[t] = ""
             grid_df[f"{t} Rtg"] = np.nan
 
-        # Pre-fill grid with 🔒 + Name + Rating 
+        # 2. Pre-fill grid with EXACT mapped strings (No Emojis!)
         for t in valid_teams:
             t_players = [p for p, team in draft_state.items() if team == t]
             for i, p_name in enumerate(t_players):
                 if i < squad_size:
+                    # Using the bulletproof map
+                    mapped_string = player_to_string_map.get(p_name, p_name)
+                    grid_df.iat[i, grid_df.columns.get_loc(t)] = mapped_string
+                    
                     p_match = master_df[master_df['Player'] == p_name]
                     if not p_match.empty:
-                        p_rtg = float(p_match.iloc[0]['AI Rating'])
-                        # The exact format injected into the backend grid DataFrame
-                        grid_df.iat[i, grid_df.columns.get_loc(t)] = f"🔒 {p_name} ({p_rtg:.1f})"
-                        grid_df.iat[i, grid_df.columns.get_loc(f"{t} Rtg")] = p_rtg
+                        grid_df.iat[i, grid_df.columns.get_loc(f"{t} Rtg")] = float(p_match.iloc[0]['AI Rating'])
 
-        # Build Clean Dropdown Options
+        # 3. Build Available Options
         avail_team_players = master_df[(master_df['Draft Status'] == "Available") & (master_df['Pool Status'] == "Team Player")].sort_values('AI Rating', ascending=False)
-        avail_opts = [f"{row['Player']} ({row['AI Rating']:.1f})" for _, row in avail_team_players.iterrows()]
+        avail_opts = [player_to_string_map[row['Player']] for _, row in avail_team_players.iterrows()]
 
         col_config = {}
         for t in valid_teams:
             t_drafted = [p for p, team in draft_state.items() if team == t]
-            t_drafted_opts = []
+            t_drafted_opts = [player_to_string_map.get(p, p) for p in t_drafted]
             
-            for p in t_drafted:
-                p_match = master_df[master_df['Player'] == p]
-                if not p_match.empty:
-                    # These locked options match the grid values EXACTLY so Streamlit renders them properly
-                    t_drafted_opts.append(f"🔒 {p} ({p_match.iloc[0]['AI Rating']:.1f})")
-            
-            # Add CLEAR PICK tool to perfectly clear a cell without fighting Streamlit's backspace logic
+            # Options perfectly match the grid_df text!
             opts = ["--- CLEAR PICK ---"] + t_drafted_opts + avail_opts
             col_config[t] = st.column_config.SelectboxColumn(f"{t} Name", options=opts, required=False)
             col_config[f"{t} Rtg"] = st.column_config.Column("Ratings", disabled=True)
 
-        # Apply Heatmap STRICTLY to Rating columns
+        # Apply Heatmap
         rtg_cols = [f"{t} Rtg" for t in valid_teams]
         styled_grid = grid_df.style.background_gradient(subset=rtg_cols, cmap='RdYlGn', vmin=10, vmax=30).format({c: "{:.1f}" for c in rtg_cols}, na_rep="")
 
+        # Render Grid
         edited_grid = st.data_editor(styled_grid, column_config=col_config, use_container_width=True, key="live_grid")
 
-        # Catching edits from the Grid
+        # 4. Check for User Edits
         grid_changed = False
-        replacements = {}
-        deletions = set()
-        additions = []
-
         for t in valid_teams:
             for i in range(squad_size):
                 old_val = grid_df.iat[i, grid_df.columns.get_loc(t)]
                 new_val = edited_grid.iat[i, edited_grid.columns.get_loc(t)]
-                
-                old_v = extract_name(old_val)
-                new_v = extract_name(new_val)
-                
-                if old_v != new_v:
+                if old_val != new_val:
                     grid_changed = True
-                    if old_v and new_v:
-                        replacements[old_v] = (new_v, t)
-                    elif old_v and not new_v:
-                        deletions.add(old_v)
-                    elif not old_v and new_v:
-                        additions.append((new_v, t))
+                    break
 
         if grid_changed:
-            # 1. Validation Loop: Check constraints before saving
+            has_error = False
+            new_draft_state = draft_state.copy()
+            
+            # Analyze changes for all teams
             for t in valid_teams:
+                # Clear this team's current players out of the proposed state
+                for p, team in list(new_draft_state.items()):
+                    if team == t:
+                        del new_draft_state[p]
+                
+                # Gather the new team roster from the grid edit
                 t_players = []
                 for i in range(squad_size):
                     val = edited_grid.iat[i, edited_grid.columns.get_loc(t)]
-                    clean_name = extract_name(val)
-                    if clean_name: 
+                    # Safely map the string back to the pure player name!
+                    clean_name = string_to_player_map.get(val, "")
+                    if clean_name:
                         t_players.append(clean_name)
                 
-                # Validation: Duplicate checks
+                # Validation checks
                 if len(t_players) != len(set(t_players)):
-                    for item in t_players:
-                        if t_players.count(item) > 1:
-                            st.session_state.draft_error = f"❌ REJECTED: You attempted to pick '{item}' multiple times. Edit reverted."
-                            break
-                    if "live_grid" in st.session_state: del st.session_state["live_grid"]
-                    st.rerun()
+                    st.session_state.draft_error = f"❌ REJECTED: Duplicate pick detected for {t}."
+                    has_error = True
+                    break
 
-                # Validation: Cap Math
                 t_spent = sum([master_df[master_df['Player'] == p]['AI Rating'].iloc[0] for p in t_players if p in master_df['Player'].values])
                 t_rem = team_budget - t_spent
                 t_count = len(t_players)
                 
                 if t_spent > team_budget:
                     st.session_state.draft_error = f"❌ SALARY CAP EXCEEDED: {t} cannot afford this roster! Edit reverted."
-                    if "live_grid" in st.session_state: del st.session_state["live_grid"]
-                    st.rerun()
+                    has_error = True
+                    break
 
                 if t_rem < (10.0 * (squad_size - t_count)):
                     min_req = 10.0 * (squad_size - t_count)
-                    st.session_state.draft_error = f"❌ INVALID ROSTER: {t} must save at least {min_req:.1f} points for remaining {squad_size - t_count} slots. Edit reverted."
-                    if "live_grid" in st.session_state: del st.session_state["live_grid"]
-                    st.rerun()
-            
-            # 2. Rebuild draft_state carefully to PRESERVE ROUND ORDER
-            new_draft_state = {}
-            for p, team in draft_state.items():
-                if p in deletions:
-                    continue
-                if p in replacements:
-                    new_p, new_t = replacements[p]
-                    new_draft_state[new_p] = new_t
-                else:
-                    new_draft_state[p] = team
-            
-            for p, t in additions:
-                new_draft_state[p] = t
-                            
-            save_json(DRAFT_FILE, new_draft_state)
-            
-            # FORCE clear the frontend cache so it rebuilds smoothly without hanging
-            if "live_grid" in st.session_state: 
-                del st.session_state["live_grid"]
-            st.rerun()
+                    st.session_state.draft_error = f"❌ INVALID ROSTER: {t} must save {min_req:.1f} points for remaining slots. Edit reverted."
+                    has_error = True
+                    break
+                    
+                # If valid, inject the roster back into the proposed state
+                for p in t_players:
+                    new_draft_state[p] = t
+
+            # 5. Process Outcome
+            if has_error:
+                # ONLY clear cache if there is an error to force it to revert the bad pick
+                if "live_grid" in st.session_state: del st.session_state["live_grid"]
+                st.rerun()
+            else:
+                # SUCCESS! Save state and rerun naturally. The cell will NOT blank.
+                save_json(DRAFT_FILE, new_draft_state)
+                st.rerun()
 
 # --- TAB 3: TEAM ANALYTICS ---
 with tab3:
