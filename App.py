@@ -68,13 +68,13 @@ def update_cap_settings():
         cw["team_budget"] = st.session_state.cap_budget
         save_json(WEIGHTS_FILE, cw)
 
-# Helper to extract plain name from dropdown formatting (e.g. "Scmal (25.2)" -> "Scmal")
 def extract_name(val):
     v_str = str(val).strip()
-    if not v_str or pd.isna(val): return ""
+    if not v_str or pd.isna(val) or v_str == "None": return ""
+    v_str = v_str.replace("🔒 ", "").replace("🔒", "")
     if " (" in v_str and v_str.endswith(")"):
         return v_str.rsplit(" (", 1)[0].strip()
-    return v_str
+    return v_str.strip()
 
 # --- LOAD STATES ---
 saved_mapping = load_json(MAPPING_FILE, {})
@@ -414,8 +414,9 @@ with tab2:
 
         # --- EXCEL-STYLE INTERACTIVE DRAFT GRID ---
         st.markdown("#### 📋 Official Draft Board Grid")
-        st.write("Click any empty cell to pick an available player. The ratings are shown in brackets next to their names so you can instantly verify their cap cost.")
+        st.write("Click any empty cell to pick an available player. The 🔒 icon indicates players who are already locked in from previous rounds.")
         
+        # Display Errors safely and clear immediately
         if "draft_error" in st.session_state:
             st.error(st.session_state.draft_error)
             del st.session_state.draft_error
@@ -425,7 +426,7 @@ with tab2:
             grid_df[t] = ""
             grid_df[f"{t} Rtg"] = np.nan
 
-        # Pre-fill grid with Name + Rating (e.g. "Scmal (25.2)")
+        # Pre-fill grid with 🔒 + Name + Rating 
         for t in valid_teams:
             t_players = [p for p, team in draft_state.items() if team == t]
             for i, p_name in enumerate(t_players):
@@ -433,10 +434,10 @@ with tab2:
                     p_match = master_df[master_df['Player'] == p_name]
                     if not p_match.empty:
                         p_rtg = float(p_match.iloc[0]['AI Rating'])
-                        grid_df.iat[i, grid_df.columns.get_loc(t)] = f"{p_name} ({p_rtg:.1f})"
+                        grid_df.iat[i, grid_df.columns.get_loc(t)] = f"🔒 {p_name} ({p_rtg:.1f})"
                         grid_df.iat[i, grid_df.columns.get_loc(f"{t} Rtg")] = p_rtg
 
-        # Build Clean Dropdown Options with Ratings included
+        # Build Clean Dropdown Options
         avail_team_players = master_df[(master_df['Draft Status'] == "Available") & (master_df['Pool Status'] == "Team Player")].sort_values('AI Rating', ascending=False)
         avail_opts = [f"{row['Player']} ({row['AI Rating']:.1f})" for _, row in avail_team_players.iterrows()]
 
@@ -448,7 +449,7 @@ with tab2:
             for p in t_drafted:
                 p_match = master_df[master_df['Player'] == p]
                 if not p_match.empty:
-                    t_drafted_opts.append(f"{p} ({p_match.iloc[0]['AI Rating']:.1f})")
+                    t_drafted_opts.append(f"🔒 {p} ({p_match.iloc[0]['AI Rating']:.1f})")
             
             opts = [""] + t_drafted_opts + avail_opts
             col_config[t] = st.column_config.SelectboxColumn(f"{t} Name", options=opts, required=False)
@@ -460,6 +461,7 @@ with tab2:
 
         edited_grid = st.data_editor(styled_grid, column_config=col_config, use_container_width=True, key="live_grid")
 
+        # Catching edits from the Grid
         grid_changed = False
         for t in valid_teams:
             for i in range(squad_size):
@@ -485,8 +487,12 @@ with tab2:
                     if clean_name: 
                         t_players.append(clean_name)
                 
+                # Check for Duplicate picks in the same column
                 if len(t_players) != len(set(t_players)):
-                    st.session_state.draft_error = f"❌ REJECTED: {t} attempted to draft a duplicate player."
+                    for item in t_players:
+                        if t_players.count(item) > 1:
+                            st.session_state.draft_error = f"❌ REJECTED: You attempted to pick '{item}' twice. Dropdown selection reverted."
+                            break
                     if "live_grid" in st.session_state: del st.session_state["live_grid"]
                     st.rerun()
 
@@ -521,6 +527,7 @@ with tab2:
                             new_draft_state[new_v] = t
                             
             save_json(DRAFT_FILE, new_draft_state)
+            # THIS forcefully completely wipes the browser cache so the grid redraws perfectly 
             if "live_grid" in st.session_state: 
                 del st.session_state["live_grid"]
             st.rerun()
