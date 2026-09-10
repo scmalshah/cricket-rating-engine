@@ -666,8 +666,8 @@ with tab5:
         st.markdown("---")
         st.markdown("### 📋 2. Mass Scouting & Overrides Table")
         st.write("Edit final scores directly in the table. The **Peer** columns display the closest matching players (±1.5 pts) for Batting, Bowling, and Fielding respectively.")
+        st.caption("*(Note: 'My Final Score' is automatically calculated for you using the engine's standard weights when you click Save)*")
         
-        # Helper to get specific skill peers for the table display
         def get_skill_peers(player_name, rating, skill_col):
             min_v, max_v = rating - 1.5, rating + 1.5
             peers = master_df[(master_df[skill_col] >= min_v) & (master_df[skill_col] <= max_v) & (master_df['Player'] != player_name)].copy()
@@ -676,7 +676,6 @@ with tab5:
             top_peers = peers.sort_values('diff').head(3)
             return ", ".join([f"{r['Player']} ({r[skill_col]:.1f})" for _, r in top_peers.iterrows()])
         
-        # Build DataFrame for the current evaluator
         scout_records = []
         for _, row in master_df.iterrows():
             p_name = row['Player']
@@ -688,12 +687,12 @@ with tab5:
                 "Bat Peers (±1.5)": get_skill_peers(p_name, row['Bat_Rating'], 'Bat_Rating'),
                 "Bowl Peers (±1.5)": get_skill_peers(p_name, row['Bowl_Rating'], 'Bowl_Rating'),
                 "Field Peers (±1.5)": get_skill_peers(p_name, row['Field_Rating'], 'Field_Rating'),
-                "AI Total": float(row['AI Rating']),
                 "Avg Scout Score": row['Avg Scout Score'],
                 "My Bat": e_data.get("Bat", None),
                 "My Bowl": e_data.get("Bowl", None),
                 "My Field": e_data.get("Field", None),
                 "My Final Score": e_data.get("Final", None),
+                "AI Total": float(row['AI Rating']),
                 "Master Override": scout_overrides.get(p_name, None)
             })
             
@@ -705,39 +704,55 @@ with tab5:
             "Bat Peers (±1.5)": st.column_config.TextColumn(disabled=True),
             "Bowl Peers (±1.5)": st.column_config.TextColumn(disabled=True),
             "Field Peers (±1.5)": st.column_config.TextColumn(disabled=True),
-            "AI Total": st.column_config.NumberColumn(disabled=True, format="%.1f"),
             "Avg Scout Score": st.column_config.NumberColumn(disabled=True, format="%.1f"),
             "My Bat": st.column_config.NumberColumn("My Bat", min_value=10.0, max_value=30.0, step=0.1),
             "My Bowl": st.column_config.NumberColumn("My Bowl", min_value=10.0, max_value=30.0, step=0.1),
             "My Field": st.column_config.NumberColumn("My Field", min_value=10.0, max_value=30.0, step=0.1),
-            "My Final Score": st.column_config.NumberColumn("My Final Score", min_value=10.0, max_value=30.0, step=0.1),
+            "My Final Score": st.column_config.NumberColumn("My Final Score (Auto)", disabled=True, format="%.1f"),
+            "AI Total": st.column_config.NumberColumn(disabled=True, format="%.1f"),
             "Master Override": st.column_config.NumberColumn("Master Override", min_value=10.0, max_value=30.0, step=0.1)
         }
         
-        # Color specific columns to guide the eye
-        styled_scout = scout_df.style.set_properties(subset=['AI Total', 'Avg Scout Score'], **{'background-color': '#f8f9fa'}) \
+        styled_scout = scout_df.style.set_properties(subset=['Avg Scout Score', 'AI Total'], **{'background-color': '#f8f9fa'}) \
             .set_properties(subset=['My Final Score', 'Master Override'], **{'background-color': '#e6f2ff'})
         
         edited_scout = st.data_editor(styled_scout, column_config=s_config, hide_index=True, use_container_width=True, height=600)
         
         if st.button("💾 Save All Table Data", type="primary"):
+            w = algo_weights
             for _, row in edited_scout.iterrows():
                 p_name = row['Player']
+                role = row['Role']
                 
                 my_bat = row['My Bat']
                 my_bowl = row['My Bowl']
                 my_fld = row['My Field']
-                my_fin = row['My Final Score']
                 
-                if pd.notna(my_bat) or pd.notna(my_bowl) or pd.notna(my_fld) or pd.notna(my_fin):
+                # If they filled out any of the inputs, process their data and auto-calculate the final score
+                if pd.notna(my_bat) or pd.notna(my_bowl) or pd.notna(my_fld):
+                    v_bat = float(my_bat) if pd.notna(my_bat) else 20.0
+                    v_bowl = float(my_bowl) if pd.notna(my_bowl) else 20.0
+                    v_fld = float(my_fld) if pd.notna(my_fld) else 20.0
+                    
+                    if role == 'Batter': 
+                        tot = w['wt_batter_bat'] + w['wt_batter_field'] or 1
+                        my_fin = (v_bat * (w['wt_batter_bat']/tot)) + (v_fld * (w['wt_batter_field']/tot))
+                    elif role == 'Bowler': 
+                        tot = w['wt_bowler_bowl'] + w['wt_bowler_field'] or 1
+                        my_fin = (v_bowl * (w['wt_bowler_bowl']/tot)) + (v_fld * (w['wt_bowler_field']/tot))
+                    else: 
+                        tot = w['wt_ar_bat'] + w['wt_ar_bowl'] + w['wt_ar_field'] or 1
+                        raw_ar = (v_bat * (w['wt_ar_bat']/tot)) + (v_bowl * (w['wt_ar_bowl']/tot)) + (v_fld * (w['wt_ar_field']/tot))
+                        my_fin = min(30.0, raw_ar * w['ar_multiplier'])
+
                     if p_name not in human_ratings: human_ratings[p_name] = {}
                     
                     human_ratings[p_name][evaluator] = {
-                        "Role": row['Role'],
-                        "Bat": float(my_bat) if pd.notna(my_bat) else 20.0,
-                        "Bowl": float(my_bowl) if pd.notna(my_bowl) else 20.0,
-                        "Field": float(my_fld) if pd.notna(my_fld) else 20.0,
-                        "Final": float(my_fin) if pd.notna(my_fin) else 20.0
+                        "Role": role,
+                        "Bat": v_bat,
+                        "Bowl": v_bowl,
+                        "Field": v_fld,
+                        "Final": float(round(my_fin, 1))
                     }
                     
                 m_override = row['Master Override']
@@ -748,7 +763,7 @@ with tab5:
 
             save_json(RATINGS_FILE, human_ratings)
             save_json(OVERRIDES_FILE, scout_overrides)
-            st.success("✅ Bulk table evaluations and overrides saved successfully!")
+            st.success("✅ Bulk table evaluations and overrides saved successfully! Your Final Scores have been calculated.")
             st.rerun()
 
 # --- TAB 6: METHODOLOGY ---
