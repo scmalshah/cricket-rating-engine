@@ -43,7 +43,8 @@ DEFAULT_WEIGHTS = {
 
 DEFAULT_CONFIG = {
     "gsheet_url": "https://docs.google.com/spreadsheets/d/16j0UEOr_DN-kDNjyFt65IxJxnuEWjyto4o_4ShA4SN0/edit?resourcekey=&gid=436661694#gid=436661694",
-    "gsheet_col": "Full name"
+    "gsheet_col": "Full name",
+    "gsheet_pool_col": "How do you want to play"
 }
 
 # --- HELPER FUNCTIONS ---
@@ -114,21 +115,36 @@ st.markdown("Advanced AI Rating, Live Roster Management, and Committee Ratings."
 
 # --- DATA PROCESSING ENGINE ---
 @st.cache_data(show_spinner="Syncing Secure Live Roster from Google Forms...", ttl=60)
-def get_raw_live_roster(url, col_name):
-    if not url or not col_name: return []
+def get_raw_live_roster(url, col_name, pool_col_name):
+    if not url or not col_name: return pd.DataFrame()
     try:
-        # Secure connection using st.connection and the service account keys
         conn = st.connection("gsheets", type=GSheetsConnection)
         df = conn.read(spreadsheet=url)
         
         match_col = next((c for c in df.columns if str(c).strip().lower() == col_name.strip().lower()), None)
+        match_pool_col = next((c for c in df.columns if pool_col_name and str(c).strip().lower() == pool_col_name.strip().lower()), None)
+        
         if match_col:
-            names = df[match_col].dropna().astype(str).apply(clean_prefix)
-            return sorted([n.strip() for n in names if n.strip()])
-        return []
+            res = pd.DataFrame()
+            res['Raw_Name'] = df[match_col].dropna().astype(str).apply(clean_prefix).str.strip()
+            res = res[res['Raw_Name'] != ""]
+            
+            # Map the Form's answer to our system's "Pool Player" vs "Team Player" string
+            if match_pool_col:
+                res['Form_Pool_Status'] = df[match_pool_col].astype(str).fillna("")
+                def parse_pool(val):
+                    v = str(val).lower()
+                    if 'pool' in v: return 'Pool Player'
+                    return 'Team Player'
+                res['Form_Pool_Status'] = res['Form_Pool_Status'].apply(parse_pool)
+            else:
+                res['Form_Pool_Status'] = "Team Player"
+                
+            return res
+        return pd.DataFrame()
     except Exception as e:
         st.error(f"⚠️ Could not sync roster securely: {e}")
-        return []
+        return pd.DataFrame()
 
 @st.cache_data(show_spinner="Reading Excel File (Only happens once)...")
 def get_raw_excel_data(file_mod_time):
@@ -309,16 +325,18 @@ file_time = os.path.getmtime(DATA_FILE) if os.path.exists(DATA_FILE) else 0
 
 # --- FETCH RAW NAMES FROM BOTH SOURCES ---
 raw_bat_cache, raw_bowl_cache, raw_field_cache, all_raw_names = get_raw_excel_data(file_time)
-raw_live_names = get_raw_live_roster(app_config.get("gsheet_url"), app_config.get("gsheet_col"))
+raw_live_df = get_raw_live_roster(app_config.get("gsheet_url"), app_config.get("gsheet_col"), app_config.get("gsheet_pool_col"))
+raw_live_names = raw_live_df['Raw_Name'].tolist() if not raw_live_df.empty else []
 
 # Calculate Excel Ratings using Mappings
 excel_master_df = calculate_ratings(raw_bat_cache, raw_bowl_cache, raw_field_cache, saved_mapping, algo_weights)
 
 # --- GOOGLE SHEET LIVE INTEGRATION ---
-if raw_live_names:
-    # Map the raw form names
-    live_roster_names = sorted(list(set([saved_mapping.get(n, n) for n in raw_live_names])))
-    roster_df = pd.DataFrame({"Player": live_roster_names})
+if not raw_live_df.empty:
+    # Map the raw form names so they fuse with the Excel stats
+    raw_live_df['Player'] = raw_live_df['Raw_Name'].map(lambda x: saved_mapping.get(x, x))
+    # Keep the last entry if someone submitted the form multiple times
+    roster_df = raw_live_df.groupby('Player').last().reset_index()[['Player', 'Form_Pool_Status']]
     
     if not excel_master_df.empty:
         master_df = pd.merge(roster_df, excel_master_df, on="Player", how="left")
@@ -337,12 +355,22 @@ if raw_live_names:
         if c not in master_df.columns: master_df[c] = 0
         master_df[c] = master_df[c].fillna(0)
 else:
-    master_df = excel_master_df
+    master_df = excel_master_df.copy()
+    if not master_df.empty:
+        master_df['Form_Pool_Status'] = "Team Player"
 
 if not master_df.empty:
     master_df['Draft Status'] = master_df['Player'].apply(lambda x: draft_state.get(x, "Available"))
     master_df['Leadership'] = master_df['Player'].apply(lambda x: leadership_state.get(x, "None"))
-    master_df['Pool Status'] = master_df['Player'].apply(lambda x: pool_state.get(x, "Team Player"))
+    
+    # Priority for Pool Status: 1. Manual Admin Override -> 2. Live Google Form choice -> 3. Default "Team Player"
+    def determine_pool_status(row):
+        admin_override = pool_state.get(row['Player'])
+        if admin_override:
+            return admin_override
+        return row.get('Form_Pool_Status', 'Team Player')
+        
+    master_df['Pool Status'] = master_df.apply(determine_pool_status, axis=1)
     
     for u in auth_users:
         master_df[u] = master_df['Player'].apply(lambda x: human_ratings.get(x, {}).get(u, {}).get('Final', np.nan))
@@ -874,17 +902,24 @@ with tab7:
         st.markdown("---")
         
         st.markdown("### 🔗 1. Live Registration Roster (Google Forms)")
-        st.write("Link your Google Form results to automatically build the Draft Pool. The Google Sheet must be set to **'Anyone with the link can view'**. Players on this list without historical Excel stats will automatically receive a 20.0 baseline AI rating.")
+        st.write("Link your Google Form results to automatically build the Draft Pool.")
         
-        g1, g2 = st.columns([3, 1])
+        g1, g2, g3 = st.columns([2, 1, 1])
         new_gsheet_url = g1.text_input("Google Sheet URL", value=app_config.get("gsheet_url", ""))
-        new_gsheet_col = g2.text_input("Column Header for Names", value=app_config.get("gsheet_col", "Full name"))
+        new_gsheet_col = g2.text_input("Header: Names", value=app_config.get("gsheet_col", "Full name"))
+        new_gsheet_pool_col = g3.text_input("Header: Pool Status", value=app_config.get("gsheet_pool_col", "How do you want to play"))
         
         if st.button("🔗 Sync Google Roster"):
             app_config["gsheet_url"] = new_gsheet_url
             app_config["gsheet_col"] = new_gsheet_col
+            app_config["gsheet_pool_col"] = new_gsheet_pool_col
             save_json(CONFIG_FILE, app_config)
-            st.success("Google Sheet configuration saved! Roster has been updated.")
+            
+            # Wipe any previous manual pool status overrides so the Google Form takes full control
+            save_json(POOL_FILE, {})
+            pool_state.clear()
+            
+            st.success("Google Sheet configuration saved! Roster and Pool Status have been updated.")
             get_raw_live_roster.clear()
             st.rerun()
 
