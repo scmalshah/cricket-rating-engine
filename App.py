@@ -68,6 +68,14 @@ def update_cap_settings():
         cw["team_budget"] = st.session_state.cap_budget
         save_json(WEIGHTS_FILE, cw)
 
+# Helper to extract plain name from dropdown formatting (e.g. "Scmal (25.2)" -> "Scmal")
+def extract_name(val):
+    v_str = str(val).strip()
+    if not v_str or pd.isna(val): return ""
+    if " (" in v_str and v_str.endswith(")"):
+        return v_str.rsplit(" (", 1)[0].strip()
+    return v_str
+
 # --- LOAD STATES ---
 saved_mapping = load_json(MAPPING_FILE, {})
 mapping_changed = False
@@ -406,35 +414,45 @@ with tab2:
 
         # --- EXCEL-STYLE INTERACTIVE DRAFT GRID ---
         st.markdown("#### 📋 Official Draft Board Grid")
-        st.write("Click any empty cell to pick an available player. The 🔒 icon indicates players who are already locked in from previous rounds.")
+        st.write("Click any empty cell to pick an available player. The ratings are shown in brackets next to their names so you can instantly verify their cap cost.")
         
+        if "draft_error" in st.session_state:
+            st.error(st.session_state.draft_error)
+            del st.session_state.draft_error
+
         grid_df = pd.DataFrame(index=[f"Round {i+1}" for i in range(squad_size)])
         for t in valid_teams:
             grid_df[t] = ""
             grid_df[f"{t} Rtg"] = np.nan
 
-        # Pre-fill grid with drafted players + Add Lock Icon
+        # Pre-fill grid with Name + Rating (e.g. "Scmal (25.2)")
         for t in valid_teams:
             t_players = [p for p, team in draft_state.items() if team == t]
             for i, p_name in enumerate(t_players):
                 if i < squad_size:
                     p_match = master_df[master_df['Player'] == p_name]
                     if not p_match.empty:
-                        grid_df.iat[i, grid_df.columns.get_loc(t)] = f"🔒 {p_name}"
-                        grid_df.iat[i, grid_df.columns.get_loc(f"{t} Rtg")] = float(p_match.iloc[0]['AI Rating'])
+                        p_rtg = float(p_match.iloc[0]['AI Rating'])
+                        grid_df.iat[i, grid_df.columns.get_loc(t)] = f"{p_name} ({p_rtg:.1f})"
+                        grid_df.iat[i, grid_df.columns.get_loc(f"{t} Rtg")] = p_rtg
 
+        # Build Clean Dropdown Options with Ratings included
         avail_team_players = master_df[(master_df['Draft Status'] == "Available") & (master_df['Pool Status'] == "Team Player")].sort_values('AI Rating', ascending=False)
-        avail_names = avail_team_players['Player'].tolist()
+        avail_opts = [f"{row['Player']} ({row['AI Rating']:.1f})" for _, row in avail_team_players.iterrows()]
 
         col_config = {}
         for t in valid_teams:
             t_drafted = [p for p, team in draft_state.items() if team == t]
-            locked_opts = [f"🔒 {p}" for p in t_drafted]
+            t_drafted_opts = []
             
-            # The dropdown will clearly show locked players vs available players
-            opts = [""] + locked_opts + avail_names
+            for p in t_drafted:
+                p_match = master_df[master_df['Player'] == p]
+                if not p_match.empty:
+                    t_drafted_opts.append(f"{p} ({p_match.iloc[0]['AI Rating']:.1f})")
+            
+            opts = [""] + t_drafted_opts + avail_opts
             col_config[t] = st.column_config.SelectboxColumn(f"{t} Name", options=opts, required=False)
-            col_config[f"{t} Rtg"] = st.column_config.Column(f"Ratings", disabled=True)
+            col_config[f"{t} Rtg"] = st.column_config.Column("Ratings", disabled=True)
 
         # Apply Heatmap STRICTLY to Rating columns
         rtg_cols = [f"{t} Rtg" for t in valid_teams]
@@ -447,8 +465,9 @@ with tab2:
             for i in range(squad_size):
                 old_val = grid_df.iat[i, grid_df.columns.get_loc(t)]
                 new_val = edited_grid.iat[i, edited_grid.columns.get_loc(t)]
-                old_v = old_val if old_val else ""
-                new_v = new_val if new_val else ""
+                
+                old_v = str(old_val).strip() if pd.notna(old_val) else ""
+                new_v = str(new_val).strip() if pd.notna(new_val) else ""
                 
                 if old_v != new_v:
                     grid_changed = True
@@ -457,39 +476,43 @@ with tab2:
         if grid_changed:
             new_draft_state = draft_state.copy()
             
-            # Extract and validate clean names (stripping the lock icon)
+            # Validation Loop
             for t in valid_teams:
                 t_players = []
                 for i in range(squad_size):
                     val = edited_grid.iat[i, edited_grid.columns.get_loc(t)]
-                    if val:
-                        clean_name = val.replace("🔒 ", "")
+                    clean_name = extract_name(val)
+                    if clean_name: 
                         t_players.append(clean_name)
                 
-                # REJECTION: Prevent duplicate picks on the same team
                 if len(t_players) != len(set(t_players)):
-                    st.error(f"❌ REJECTED: {t} attempted to draft a player who is already locked on their roster.")
-                    st.stop()
-                
+                    st.session_state.draft_error = f"❌ REJECTED: {t} attempted to draft a duplicate player."
+                    if "live_grid" in st.session_state: del st.session_state["live_grid"]
+                    st.rerun()
+
                 t_spent = sum([master_df[master_df['Player'] == p]['AI Rating'].iloc[0] for p in t_players if p in master_df['Player'].values])
                 t_rem = team_budget - t_spent
                 t_count = len(t_players)
                 
                 if t_spent > team_budget:
-                    st.error(f"❌ SALARY CAP EXCEEDED: {t} cannot afford this roster! Edit reverted.")
-                    st.stop()
+                    st.session_state.draft_error = f"❌ SALARY CAP EXCEEDED: {t} cannot afford this roster! Edit reverted."
+                    if "live_grid" in st.session_state: del st.session_state["live_grid"]
+                    st.rerun()
+
                 if t_rem < (10.0 * (squad_size - t_count)):
                     min_req = 10.0 * (squad_size - t_count)
-                    st.error(f"❌ INVALID ROSTER: {t} must save at least {min_req:.1f} points for remaining {squad_size - t_count} slots. Edit reverted.")
-                    st.stop()
+                    st.session_state.draft_error = f"❌ INVALID ROSTER: {t} must save at least {min_req:.1f} points for remaining {squad_size - t_count} slots. Edit reverted."
+                    if "live_grid" in st.session_state: del st.session_state["live_grid"]
+                    st.rerun()
             
-            # Apply Changes
+            # Application Loop
             for t in valid_teams:
                 for i in range(squad_size):
                     old_val = grid_df.iat[i, grid_df.columns.get_loc(t)]
                     new_val = edited_grid.iat[i, edited_grid.columns.get_loc(t)]
-                    old_v = old_val.replace("🔒 ", "") if old_val else ""
-                    new_v = new_val.replace("🔒 ", "") if new_val else ""
+                    
+                    old_v = extract_name(old_val)
+                    new_v = extract_name(new_val)
                     
                     if old_v != new_v:
                         if old_v and old_v in new_draft_state:
@@ -498,6 +521,8 @@ with tab2:
                             new_draft_state[new_v] = t
                             
             save_json(DRAFT_FILE, new_draft_state)
+            if "live_grid" in st.session_state: 
+                del st.session_state["live_grid"]
             st.rerun()
 
 # --- TAB 3: TEAM ANALYTICS ---
