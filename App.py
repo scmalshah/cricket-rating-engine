@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -8,7 +7,7 @@ import re
 import plotly.graph_objects as go
 import plotly.express as px
 
-st.set_page_config(page_title="BPL Cricket Rating Engine", layout="wide", page_icon="🏏")
+st.set_page_config(page_title="BPL Cricket", layout="wide", page_icon="🏏")
 
 # --- FILE PATHS & SECRETS ---
 DATA_FILE = "current_stats.xlsx"
@@ -101,8 +100,8 @@ for k, v in DEFAULT_WEIGHTS.items():
     if k not in algo_weights: algo_weights[k] = v
 
 # --- HEADER ---
-st.title("🏏 BPL Cricket Rating Engine")
-st.markdown("Advanced AI Rating, Live Roster Management, and Committee Scouting.")
+st.title("🏏 BPL Cricket")
+st.markdown("Advanced AI Rating, Live Roster Management, and Committee Ratings.")
 
 # --- DATA PROCESSING ENGINE ---
 @st.cache_data(show_spinner="Reading Excel File (Only happens once)...")
@@ -306,24 +305,23 @@ if not master_df.empty:
         string_to_player_map[disp_string] = row['Player']
 
 # --- UI TABS ---
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["🏆 Live Draft Board", "🎯 Snake Draft Room", "📊 Team Analytics", "🕸️ Player Profiles", "📝 Committee Scouting", "🧠 Methodology", "⚙️ Admin & Data"])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["🏆 Live Dashboard", "🎯 Team Selection", "📊 Team Analytics", "🕸️ Player Profiles", "📝 Committee Ratings", "🧠 Methodology", "⚙️ Admin & Data"])
 
-# --- TAB 1: DRAFT BOARD ---
+# --- TAB 1: LIVE DASHBOARD ---
 with tab1:
     if master_df.empty:
         st.info("👋 Welcome! Please navigate to the '⚙️ Admin & Data' tab and upload your Excel stats file.")
     else:
-        st.subheader("Live Interactive Draft Board")
+        st.subheader("Live Interactive Dashboard")
         
-        c1, c2, c3, c4 = st.columns(4)
+        # Combined KPIs and Filters into a single horizontal row to save vertical space
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
         c1.metric("Total Players", len(master_df))
         c2.metric("Available Players", len(master_df[master_df['Draft Status'] == "Available"]))
         c3.metric("Platinum Tier", len(master_df[master_df['Tier'] == "Platinum"]))
         c4.metric("Avg AI Rating", round(master_df['AI Rating'].mean(), 1))
-
-        f1, f2 = st.columns(2)
-        role_f = f1.selectbox("Filter Role", ["All", "Batter", "Bowler", "All-Rounder"])
-        status_f = f2.selectbox("Filter Status", ["Available Only", "All Players"] + [t for t in TEAMS if t != "Available"])
+        role_f = c5.selectbox("Filter Role", ["All", "Batter", "Bowler", "All-Rounder"])
+        status_f = c6.selectbox("Filter Status", ["Available Only", "All Players"] + [t for t in TEAMS if t != "Available"])
         
         disp_df = master_df.copy()
         if role_f != "All": disp_df = disp_df[disp_df['Role'] == role_f]
@@ -332,7 +330,6 @@ with tab1:
 
         disp_df['Player'] = disp_df.apply(lambda r: f"{r['Player']} (C)" if r['Leadership'] == 'Captain' else (f"{r['Player']} (VC)" if r['Leadership'] == 'Vice Captain' else r['Player']), axis=1)
 
-        # Added the 3 individual AI Ratings to the master board view
         col_order = [
             'Player', 'Role', 'Tier', 'Pool Status',
             'Runs_bat', 'Bat Avg', 'SR_bat', 'Boundary_Pct',
@@ -366,12 +363,12 @@ with tab1:
             
         st.dataframe(styled_df, use_container_width=True)
 
-# --- TAB 2: SNAKE DRAFT ROOM ---
+# --- TAB 2: TEAM SELECTION ---
 with tab2:
     if master_df.empty:
         st.info("Data required.")
     else:
-        st.subheader("🎯 Live Snake Draft & Salary Cap Room")
+        st.subheader("🎯 Team Selection & Salary Cap")
         
         squad_size = int(algo_weights.get("squad_size", 11))
         team_budget = float(algo_weights.get("team_budget", 240.0))
@@ -421,7 +418,7 @@ with tab2:
 
         st.dataframe(sum_df.style.apply(color_summary, axis=None), use_container_width=True)
 
-        st.markdown("#### 📋 Official Draft Board Grid")
+        st.markdown("#### 📋 Official Team Selection Grid")
         st.write("Click an empty cell to pick a player. If you need to remove someone, select **`--- CLEAR PICK ---`**.")
         
         if "draft_error" in st.session_state:
@@ -521,7 +518,7 @@ with tab3:
         st.subheader("Live Team Balance Analytics")
         drafted = master_df[master_df['Draft Status'] != "Available"]
         if drafted.empty:
-            st.info("No players drafted yet. Use the Draft Room to begin.")
+            st.info("No players drafted yet. Use Team Selection to begin.")
         else:
             team_stats = drafted.groupby('Draft Status').agg(
                 Players=('Player', 'count'), Total_AI_Rating=('AI Rating', 'sum'),
@@ -593,12 +590,12 @@ with tab4:
                 fig.update_layout(polar=dict(radialaxis=dict(visible=False, range=[0, 1])), showlegend=False, title="Skill Heptagon")
                 st.plotly_chart(fig, use_container_width=True)
 
-# --- TAB 5: COMMITTEE SCOUTING ---
+# --- TAB 5: COMMITTEE RATINGS ---
 with tab5:
     if master_df.empty:
         st.info("Data required.")
     else:
-        st.subheader("📝 Committee Scouting & Overrides")
+        st.subheader("📝 Committee Ratings & Overrides")
         evaluator = st.selectbox("Select Your Name", auth_users)
         
         st.markdown("---")
@@ -642,7 +639,6 @@ with tab5:
         
         w = algo_weights
         
-        # CORRECTED MATH: Pure 10-30 scale evaluation without AI standard deviation inflations
         if sel_role == 'Batter': 
             tot = w['wt_batter_bat'] + w['wt_batter_field'] or 1
             calc_final = (val_bat * (w['wt_batter_bat']/tot)) + (val_fld * (w['wt_batter_field']/tot))
@@ -669,7 +665,7 @@ with tab5:
             st.rerun()
 
         st.markdown("---")
-        st.markdown("### 📋 2. Mass Scouting & Overrides Table")
+        st.markdown("### 📋 2. Mass Ratings & Overrides Table")
         st.write("Edit final scores directly in the table. The **Peer** columns display the closest matching players (±1.5 pts) for Batting, Bowling, and Fielding respectively.")
         st.caption("*(Note: To prevent errors, 'My Final Score' visually updates immediately after you click Save Data.)*")
         
@@ -735,7 +731,6 @@ with tab5:
                 
                 p_match = master_df[master_df['Player'] == p_name].iloc[0]
                 
-                # CORRECTED MATH: Gracefully default to AI Rating if field is skipped
                 if pd.notna(my_bat) or pd.notna(my_bowl) or pd.notna(my_fld):
                     v_bat = float(my_bat) if pd.notna(my_bat) else float(p_match['Bat_Rating'])
                     v_bowl = float(my_bowl) if pd.notna(my_bowl) else float(p_match['Bowl_Rating'])
@@ -917,7 +912,7 @@ with tab7:
                 "wt_ar_bat": w_wt_ar_bat, "wt_ar_bowl": w_wt_ar_bowl, "wt_ar_field": w_wt_ar_field, "ar_multiplier": w_ar_multiplier
             }
             save_json(WEIGHTS_FILE, new_weights)
-            st.success("✅ Engine settings updated! Head to the Draft Room to see the new Cap limits.")
+            st.success("✅ Engine settings updated! Head to Team Selection to see the new Cap limits.")
             st.rerun()
 
         st.markdown("---")
