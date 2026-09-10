@@ -353,7 +353,7 @@ with tab2:
         st.info("Data required.")
     else:
         st.subheader("🎯 Live Snake Draft & Salary Cap Room")
-        st.write("Captains take turns picking players. You must stay under your total Point Limit while filling all roster spots.")
+        st.write("Select players directly from the Interactive Roster Grid below. The system will automatically track budgets and update ratings in real-time.")
         
         squad_size = int(algo_weights.get("squad_size", 11))
         team_budget = float(algo_weights.get("team_budget", 240.0))
@@ -373,25 +373,56 @@ with tab2:
         st.markdown("---")
         st.markdown(f"### 🟢 ON THE CLOCK: **{on_the_clock}** (Round {round_num}, Pick {pick_in_round + 1})")
         
+        # --- STYLED SUMMARY STATISTICS TABLE ---
+        st.markdown("#### 💰 Franchise Cap & Roster Summary")
+        sum_df = pd.DataFrame(index=["Total Points Burnt", "Total Players Added", "Total Points Allocated", "Remaining Points", "Players yet to take"])
+        
+        for t in valid_teams:
+            t_df = drafted_df[drafted_df['Draft Status'] == t]
+            spent = t_df['AI Rating'].sum() if not t_df.empty else 0.0
+            rem = team_budget - spent
+            players_added = len(t_df)
+            players_needed = squad_size - players_added
+            
+            sum_df[t] = ["", "", "", "", ""]
+            sum_df[f"{t} Rtg"] = [
+                f"{spent:.1f}", str(players_added), f"{team_budget:.1f}", f"{rem:.1f}", str(players_needed)
+            ]
+            
+        # Apply Pandas Styling to the Summary Table
+        def color_summary(df):
+            style_df = pd.DataFrame('', index=df.index, columns=df.columns)
+            for c in df.columns:
+                if "Rtg" in c:
+                    try:
+                        rem_val = float(df.at["Remaining Points", c])
+                        style_df.at["Remaining Points", c] = 'background-color: #d4edda; color: #155724; font-weight: bold;' if rem_val >= 0 else 'background-color: #f8d7da; color: #721c24; font-weight: bold;'
+                        style_df.at["Total Points Burnt", c] = 'background-color: #fff3cd; color: #856404; font-weight: bold;'
+                        style_df.at["Total Points Allocated", c] = 'background-color: #e2e3e5; color: #383d41;'
+                    except:
+                        pass
+            return style_df
+
+        st.dataframe(sum_df.style.apply(color_summary, axis=None), use_container_width=True)
+
         # --- EXCEL-STYLE INTERACTIVE DRAFT GRID ---
         st.markdown("#### 📋 Official Draft Board Grid")
-        st.write("Select players directly from the dropdowns below. Once picked, they instantly vanish from the available list, and their AI Rating is automatically populated.")
+        st.write("Click any empty cell to pick an available Team Player. Players instantly vanish from the pool once selected.")
         
         grid_df = pd.DataFrame(index=[f"Round {i+1}" for i in range(squad_size)])
         for t in valid_teams:
             grid_df[t] = ""
-            grid_df[f"{t} Rtg"] = ""
+            grid_df[f"{t} Rtg"] = np.nan  # Initialize as NaN for heatmap coloring
 
-        # Pre-fill grid with drafted players in chronological pick order (no sorting)
+        # Pre-fill grid with drafted players
         for t in valid_teams:
             t_players = [p for p, team in draft_state.items() if team == t]
-            
             for i, p_name in enumerate(t_players):
                 if i < squad_size:
                     p_match = master_df[master_df['Player'] == p_name]
                     if not p_match.empty:
                         grid_df.iat[i, grid_df.columns.get_loc(t)] = p_name
-                        grid_df.iat[i, grid_df.columns.get_loc(f"{t} Rtg")] = f"{p_match.iloc[0]['AI Rating']:.1f}"
+                        grid_df.iat[i, grid_df.columns.get_loc(f"{t} Rtg")] = float(p_match.iloc[0]['AI Rating'])
 
         # Config dropdown options (Only "Team Players" allowed)
         avail_team_players = master_df[(master_df['Draft Status'] == "Available") & (master_df['Pool Status'] == "Team Player")].sort_values('AI Rating', ascending=False)
@@ -404,13 +435,29 @@ with tab2:
             col_config[t] = st.column_config.SelectboxColumn(f"{t} Name", options=opts)
             col_config[f"{t} Rtg"] = st.column_config.Column(f"Ratings", disabled=True)
 
-        edited_grid = st.data_editor(grid_df, column_config=col_config, use_container_width=True, key="live_grid")
+        # Apply Heatmap Gradient to the Grid Ratings
+        rtg_cols = [f"{t} Rtg" for t in valid_teams]
+        styled_grid = grid_df.style.background_gradient(subset=rtg_cols, cmap='RdYlGn', vmin=10, vmax=30).format({c: "{:.1f}" for c in rtg_cols}, na_rep="")
 
-        # Catching edits from the Grid instantly (No password required)
-        if not grid_df.equals(edited_grid):
+        edited_grid = st.data_editor(styled_grid, column_config=col_config, use_container_width=True, key="live_grid")
+
+        # Check if Names Changed (Avoids NaN comparison issues)
+        grid_changed = False
+        for t in valid_teams:
+            for i in range(squad_size):
+                old_val = grid_df.iat[i, grid_df.columns.get_loc(t)]
+                new_val = edited_grid.iat[i, edited_grid.columns.get_loc(t)]
+                old_v = old_val if old_val else ""
+                new_v = new_val if new_val else ""
+                
+                if old_v != new_v:
+                    grid_changed = True
+                    break
+
+        if grid_changed:
             new_draft_state = draft_state.copy()
-            grid_changed = False
             
+            # Validation Loop
             for t in valid_teams:
                 t_players = []
                 for i in range(squad_size):
@@ -429,42 +476,22 @@ with tab2:
                     st.error(f"❌ INVALID ROSTER: {t} must save at least {min_req:.1f} points for remaining {squad_size - t_count} slots. Edit reverted.")
                     st.stop()
             
+            # Application Loop
             for t in valid_teams:
                 for i in range(squad_size):
                     old_val = grid_df.iat[i, grid_df.columns.get_loc(t)]
                     new_val = edited_grid.iat[i, edited_grid.columns.get_loc(t)]
-                    if old_val != new_val:
-                        grid_changed = True
-                        if old_val and old_val in new_draft_state:
-                            del new_draft_state[old_val]
-                        if new_val:
-                            new_draft_state[new_val] = t
+                    old_v = old_val if old_val else ""
+                    new_v = new_val if new_val else ""
+                    
+                    if old_v != new_v:
+                        if old_v and old_v in new_draft_state:
+                            del new_draft_state[old_v]
+                        if new_v:
+                            new_draft_state[new_v] = t
                             
-            if grid_changed:
-                save_json(DRAFT_FILE, new_draft_state)
-                st.rerun()
-
-        # --- SUMMARY STATISTICS TABLE ---
-        st.markdown("#### 💰 Cumulative Roster & Cap Summary")
-        sum_df = pd.DataFrame(index=["Total Points Burnt", "Total Players Added", "Total Points Allocated", "Remaining Points", "Players yet to take"])
-        
-        for t in valid_teams:
-            t_df = drafted_df[drafted_df['Draft Status'] == t]
-            spent = t_df['AI Rating'].sum() if not t_df.empty else 0.0
-            rem = team_budget - spent
-            players_added = len(t_df)
-            players_needed = squad_size - players_added
-            
-            sum_df[t] = ["", "", "", "", ""]
-            sum_df[f"{t} Rtg"] = [
-                f"{spent:.1f}",
-                str(players_added),
-                f"{team_budget:.1f}",
-                f"{rem:.1f}",
-                str(players_needed)
-            ]
-            
-        st.dataframe(sum_df, use_container_width=True)
+            save_json(DRAFT_FILE, new_draft_state)
+            st.rerun()
 
 # --- TAB 3: TEAM ANALYTICS ---
 with tab3:
