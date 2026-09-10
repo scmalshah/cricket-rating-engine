@@ -119,7 +119,6 @@ def get_raw_live_roster(url, col_name, pool_col_name):
     if not url or not col_name: return pd.DataFrame()
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
-        # BUGFIX: ttl=0 forces the connection library to bypass its internal cache and pull live data
         df = conn.read(spreadsheet=url, ttl=0)
         
         match_col = next((c for c in df.columns if str(c).strip().lower() == col_name.strip().lower()), None)
@@ -306,11 +305,25 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w):
         
     valid['Final_Raw'] = valid.apply(calc_final, axis=1)
 
+    # 1. Standard Normal Z-Score Calculation
     mean_raw = valid['Final_Raw'].mean()
     std_raw = valid['Final_Raw'].std() or 1
-    
     valid['AI Rating'] = 20.0 + ((valid['Final_Raw'] - mean_raw) / std_raw) * 3.33
     valid['AI Rating'] = valid['AI Rating'].clip(lower=10.0, upper=30.0).round(1)
+    
+    # 2. Min-Max Standardization (Range Expander)
+    min_raw = valid['Final_Raw'].min()
+    max_raw = valid['Final_Raw'].max()
+    if max_raw == min_raw:
+        valid['Rtg_MinMax'] = 20.0
+    else:
+        valid['Rtg_MinMax'] = 10.0 + ((valid['Final_Raw'] - min_raw) / (max_raw - min_raw)) * 20.0
+    valid['Rtg_MinMax'] = valid['Rtg_MinMax'].clip(lower=10.0, upper=30.0).round(1)
+    
+    # 3. Percentile Rank (Uniform Distribution)
+    pct_ranks = valid['Final_Raw'].rank(pct=True)
+    valid['Rtg_Pct'] = 10.0 + (pct_ranks * 20.0)
+    valid['Rtg_Pct'] = valid['Rtg_Pct'].clip(lower=10.0, upper=30.0).round(1)
     
     for col, new_col in [('Bat_Score', 'Bat_Rating'), ('Bowl_Score', 'Bowl_Rating'), ('Fielding_Score', 'Field_Rating')]:
         mean_val = valid[col].mean()
@@ -318,6 +331,7 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w):
         valid[new_col] = 20.0 + ((valid[col] - mean_val) / std_val) * 3.33
         valid[new_col] = valid[new_col].clip(lower=10.0, upper=30.0).round(1)
 
+    # Keep Z-Score Primary for Tiers
     valid['Tier'] = pd.cut(valid['AI Rating'], bins=[0, 16.9, 22.9, 26.9, 31], labels=["Bronze", "Silver", "Gold", "Platinum"])
     return valid
 
@@ -342,6 +356,16 @@ if not raw_live_df.empty:
         master_df = roster_df
         
     master_df['AI Rating'] = master_df['AI Rating'].fillna(20.0)
+    if 'Rtg_MinMax' in master_df.columns:
+        master_df['Rtg_MinMax'] = master_df['Rtg_MinMax'].fillna(20.0)
+    else:
+        master_df['Rtg_MinMax'] = 20.0
+    
+    if 'Rtg_Pct' in master_df.columns:
+        master_df['Rtg_Pct'] = master_df['Rtg_Pct'].fillna(20.0)
+    else:
+        master_df['Rtg_Pct'] = 20.0
+        
     master_df['Bat_Rating'] = master_df['Bat_Rating'].fillna(20.0)
     master_df['Bowl_Rating'] = master_df['Bowl_Rating'].fillna(20.0)
     master_df['Field_Rating'] = master_df['Field_Rating'].fillna(20.0)
@@ -424,7 +448,8 @@ with tab1:
             'Player', 'Role', 'Tier', 'Pool Status',
             'Runs_bat', 'Bat Avg', 'SR_bat', 'Boundary_Pct',
             'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 'Extras_Rate',
-            'Total_Fielding', 'Bat_Rating', 'Bowl_Rating', 'Field_Rating', 'AI Rating'
+            'Total_Fielding', 'Bat_Rating', 'Bowl_Rating', 'Field_Rating', 
+            'AI Rating', 'Rtg_MinMax', 'Rtg_Pct'
         ] + auth_users + ['Avg Scout Score', 'Scout Override', 'Final Scout Rating', 'Draft Status']
         
         disp_df = disp_df[col_order].sort_values('AI Rating', ascending=False)
@@ -433,7 +458,8 @@ with tab1:
             'Player', 'Role', 'Tier', 'Pool Status',
             'Runs', 'Bat Avg', 'Bat SR', 'Bound %',
             'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 'Extras/Ov',
-            'Fielding', 'Bat Rtg', 'Bowl Rtg', 'Field Rtg', 'AI Rating'
+            'Fielding', 'Bat Rtg', 'Bowl Rtg', 'Field Rtg', 
+            'AI Rtg (Z-Score)', 'AI Rtg (MinMax)', 'AI Rtg (Pct)'
         ] + auth_users + ['Avg Scout Score', 'Scout Override', 'Final Scout Rating', 'Draft Status']
         
         disp_df.columns = new_columns
@@ -444,12 +470,13 @@ with tab1:
             'Bat Avg': '{:.2f}', 'Bat SR': '{:.1f}', 'Bound %': '{:.1f}%',
             'Bowl Avg': '{:.2f}', 'Bowl SR': '{:.1f}', 'Econ': '{:.2f}', 'Extras/Ov': '{:.2f}',
             'Bat Rtg': '{:.1f}', 'Bowl Rtg': '{:.1f}', 'Field Rtg': '{:.1f}',
-            'AI Rating': '{:.1f}', 'Avg Scout Score': '{:.1f}', 'Scout Override': '{:.1f}', 'Final Scout Rating': '{:.1f}'
+            'AI Rtg (Z-Score)': '{:.1f}', 'AI Rtg (MinMax)': '{:.1f}', 'AI Rtg (Pct)': '{:.1f}', 
+            'Avg Scout Score': '{:.1f}', 'Scout Override': '{:.1f}', 'Final Scout Rating': '{:.1f}'
         }
         for u in auth_users:
             fmt_dict[u] = '{:.1f}'
             
-        styled_df = disp_df.style.background_gradient(subset=['AI Rating', 'Final Scout Rating'], cmap='RdYlGn', vmin=10, vmax=30)\
+        styled_df = disp_df.style.background_gradient(subset=['AI Rtg (Z-Score)', 'AI Rtg (MinMax)', 'AI Rtg (Pct)', 'Final Scout Rating'], cmap='RdYlGn', vmin=10, vmax=30)\
             .format(fmt_dict, na_rep="-")
             
         st.dataframe(styled_df, use_container_width=True, column_order=disp_df.columns.tolist())
@@ -641,9 +668,16 @@ with tab4:
             with pc1:
                 st.markdown(f"### {p_data['Player']} {tag}")
                 st.markdown(f"**Role:** {p_data['Role']} | **Tier:** {p_data['Tier']} | **Status:** {p_data['Pool Status']}")
-                st.markdown(f"**AI Rating:** {p_data['AI Rating']:.1f}/30.0")
-                st.markdown(f"**Final Scout Rating:** {p_data['Final Scout Rating']:.1f}")
+                
+                # Show all three distributions side-by-side
+                st.markdown("---")
+                st.markdown("#### Mathematical Evaluations")
+                st.markdown(f"**AI Rtg (Z-Score):** `{p_data['AI Rating']:.1f}` *(Standard Normal Distribution)*")
+                st.markdown(f"**AI Rtg (MinMax):** `{p_data.get('Rtg_MinMax', 20.0):.1f}` *(Linear Scale from Best to Worst)*")
+                st.markdown(f"**AI Rtg (Percentile):** `{p_data.get('Rtg_Pct', 20.0):.1f}` *(Uniform Ranking)*")
+                st.markdown(f"**Final Scout Rating:** `{p_data['Final Scout Rating']:.1f}` *(Human Committee)*")
                 st.markdown(f"**Drafted To:** {p_data['Draft Status']}")
+                
                 st.markdown("---")
                 st.markdown(f"**Total Runs:** {int(p_data['Runs_bat'])} *(Avg: {p_data['Bat Avg']:.2f}, SR: {p_data['SR_bat']:.1f}, Bound %: {p_data['Boundary_Pct']:.1f}%)*")
                 st.markdown(f"**Total Wkts:** {int(p_data['Wkts'])} *(Avg: {p_data['Bowl Avg']:.2f}, SR: {p_data['Bowl SR']:.1f}, Econ: {p_data['Econ']:.2f})*")
