@@ -314,9 +314,6 @@ with tab1:
     else:
         st.subheader("Live Interactive Dashboard")
         
-        # --- MOBILE-FRIENDLY HORIZONTAL KPIs ---
-        # Instead of using st.columns() which stacks vertically on phones, 
-        # this custom flex-box layout guarantees horizontal rendering everywhere to save space.
         total_p = len(master_df)
         avail_p = len(master_df[master_df['Draft Status'] == "Available"])
         plat_p = len(master_df[master_df['Tier'] == "Platinum"])
@@ -342,6 +339,7 @@ with tab1:
 
         disp_df['Player'] = disp_df.apply(lambda r: f"{r['Player']} (C)" if r['Leadership'] == 'Captain' else (f"{r['Player']} (VC)" if r['Leadership'] == 'Vice Captain' else r['Player']), axis=1)
 
+        # STRICT COLUMN ENFORCEMENT: This guarantees Streamlit will not shuffle the columns
         col_order = [
             'Player', 'Role', 'Tier', 'Pool Status',
             'Runs_bat', 'Bat Avg', 'SR_bat', 'Boundary_Pct',
@@ -351,13 +349,15 @@ with tab1:
         
         disp_df = disp_df[col_order].sort_values('AI Rating', ascending=False)
         
-        rename_cols = {
-            'Runs_bat': 'Runs', 'SR_bat': 'Bat SR', 'Boundary_Pct': 'Bound %',
-            'Bowl Avg': 'Bowl Avg', 'Bowl SR': 'Bowl SR', 'Econ': 'Econ', 'Extras_Rate': 'Extras/Ov',
-            'Total_Fielding': 'Fielding',
-            'Bat_Rating': 'Bat Rtg', 'Bowl_Rating': 'Bowl Rtg', 'Field_Rating': 'Field Rtg'
-        }
-        disp_df.rename(columns=rename_cols, inplace=True)
+        # Explicit renaming using strict list assignment to prevent pandas/streamlit mapping issues
+        new_columns = [
+            'Player', 'Role', 'Tier', 'Pool Status',
+            'Runs', 'Bat Avg', 'Bat SR', 'Bound %',
+            'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 'Extras/Ov',
+            'Fielding', 'Bat Rtg', 'Bowl Rtg', 'Field Rtg', 'AI Rating'
+        ] + auth_users + ['Avg Scout Score', 'Scout Override', 'Final Scout Rating', 'Draft Status']
+        
+        disp_df.columns = new_columns
         disp_df = disp_df.set_index('Player')
         
         fmt_dict = {
@@ -373,7 +373,8 @@ with tab1:
         styled_df = disp_df.style.background_gradient(subset=['AI Rating', 'Final Scout Rating'], cmap='RdYlGn', vmin=10, vmax=30)\
             .format(fmt_dict, na_rep="-")
             
-        st.dataframe(styled_df, use_container_width=True)
+        # PASSING COLUMN_ORDER OVERRIDES CACHED FRONTEND BUGS
+        st.dataframe(styled_df, use_container_width=True, column_order=disp_df.columns)
 
 # --- TAB 2: TEAM SELECTION ---
 with tab2:
@@ -729,7 +730,13 @@ with tab5:
         styled_scout = scout_df.style.set_properties(subset=['Avg Scout Score', 'AI Total'], **{'background-color': '#f8f9fa'}) \
             .set_properties(subset=['My Final Score', 'Master Override'], **{'background-color': '#e6f2ff'})
         
-        edited_scout = st.data_editor(styled_scout, column_config=s_config, hide_index=True, use_container_width=True, height=600)
+        # Explicit order for Tab 5 to prevent Streamlit from randomly shifting columns
+        tab5_col_order = [
+            "Player", "Role", "Bat Peers (±1.5)", "Bowl Peers (±1.5)", "Field Peers (±1.5)", 
+            "Avg Scout Score", "My Bat", "My Bowl", "My Field", "My Final Score", "AI Total", "Master Override"
+        ]
+        
+        edited_scout = st.data_editor(styled_scout, column_config=s_config, column_order=tab5_col_order, hide_index=True, use_container_width=True, height=600)
         
         if st.button("💾 Save All Table Data", type="primary"):
             w = algo_weights
