@@ -358,8 +358,6 @@ with tab2:
         squad_size = int(algo_weights.get("squad_size", 11))
         team_budget = float(algo_weights.get("team_budget", 240.0))
         
-        draft_pass = st.text_input("Enter Admin Password to unlock drafting", type="password", key="draft_pass")
-        
         valid_teams = [t for t in TEAMS if t != "Available"]
         num_teams = len(valid_teams)
         drafted_df = master_df[master_df['Draft Status'] != "Available"]
@@ -377,23 +375,23 @@ with tab2:
         
         # --- EXCEL-STYLE INTERACTIVE DRAFT GRID ---
         st.markdown("#### 📋 Official Draft Board Grid")
-        st.write("Select players directly from the dropdowns below. Once a player is picked, they will vanish from the available list.")
+        st.write("Select players directly from the dropdowns below. Once picked, they instantly vanish from the available list, and their AI Rating is automatically populated.")
         
         grid_df = pd.DataFrame(index=[f"Round {i+1}" for i in range(squad_size)])
         for t in valid_teams:
             grid_df[t] = ""
             grid_df[f"{t} Rtg"] = ""
 
-        # Pre-fill grid with drafted players
+        # Pre-fill grid with drafted players in chronological pick order (no sorting)
         for t in valid_teams:
-            t_df = drafted_df[drafted_df['Draft Status'] == t].copy()
-            t_df['L_Order'] = t_df['Leadership'].map({"Captain": 0, "Vice Captain": 1, "None": 2})
-            t_df = t_df.sort_values(['L_Order', 'AI Rating'], ascending=[True, False])
+            t_players = [p for p, team in draft_state.items() if team == t]
             
-            for i, (_, row) in enumerate(t_df.iterrows()):
+            for i, p_name in enumerate(t_players):
                 if i < squad_size:
-                    grid_df.iat[i, grid_df.columns.get_loc(t)] = row['Player']
-                    grid_df.iat[i, grid_df.columns.get_loc(f"{t} Rtg")] = f"{row['AI Rating']:.1f}"
+                    p_match = master_df[master_df['Player'] == p_name]
+                    if not p_match.empty:
+                        grid_df.iat[i, grid_df.columns.get_loc(t)] = p_name
+                        grid_df.iat[i, grid_df.columns.get_loc(f"{t} Rtg")] = f"{p_match.iloc[0]['AI Rating']:.1f}"
 
         # Config dropdown options (Only "Team Players" allowed)
         avail_team_players = master_df[(master_df['Draft Status'] == "Available") & (master_df['Pool Status'] == "Team Player")].sort_values('AI Rating', ascending=False)
@@ -401,30 +399,24 @@ with tab2:
 
         col_config = {}
         for t in valid_teams:
-            t_drafted = drafted_df[drafted_df['Draft Status'] == t]['Player'].tolist()
+            t_drafted = [p for p, team in draft_state.items() if team == t]
             opts = [""] + t_drafted + avail_names
             col_config[t] = st.column_config.SelectboxColumn(f"{t} Name", options=opts)
             col_config[f"{t} Rtg"] = st.column_config.Column(f"Ratings", disabled=True)
 
         edited_grid = st.data_editor(grid_df, column_config=col_config, use_container_width=True, key="live_grid")
 
-        # Catching edits from the Grid
+        # Catching edits from the Grid instantly (No password required)
         if not grid_df.equals(edited_grid):
-            if draft_pass != ADMIN_PASSWORD:
-                st.error("❌ Enter Admin Password above to make draft picks.")
-                st.stop()
-
             new_draft_state = draft_state.copy()
             grid_changed = False
             
             for t in valid_teams:
-                # Build new roster list based on the user's edit
                 t_players = []
                 for i in range(squad_size):
                     val = edited_grid.iat[i, edited_grid.columns.get_loc(t)]
                     if val: t_players.append(val)
                 
-                # Check Salary Cap before allowing the edit to save
                 t_spent = sum([master_df[master_df['Player'] == p]['AI Rating'].iloc[0] for p in t_players if p in master_df['Player'].values])
                 t_rem = team_budget - t_spent
                 t_count = len(t_players)
@@ -437,7 +429,6 @@ with tab2:
                     st.error(f"❌ INVALID ROSTER: {t} must save at least {min_req:.1f} points for remaining {squad_size - t_count} slots. Edit reverted.")
                     st.stop()
             
-            # If all checks pass, commit the changes to the engine
             for t in valid_teams:
                 for i in range(squad_size):
                     old_val = grid_df.iat[i, grid_df.columns.get_loc(t)]
@@ -831,5 +822,3 @@ with tab7:
                 if "pool" in restore_data: save_json(POOL_FILE, restore_data.get("pool", {}))
                 st.success("✅ Server state fully restored!")
                 st.rerun()
-    elif password_attempt != "":
-        st.error("Incorrect password.")
