@@ -189,10 +189,16 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping):
     mean_raw = valid['Final_Raw'].mean()
     std_raw = valid['Final_Raw'].std() or 1
     
-    # Centers the league exactly at 20.0. 3.33 standard deviations creates a natural spread from 10 to 30.
     valid['AI Rating'] = 20.0 + ((valid['Final_Raw'] - mean_raw) / std_raw) * 3.33
     valid['AI Rating'] = valid['AI Rating'].clip(lower=10.0, upper=30.0).round(1)
     
+    # Calculate 10-30 scale for individual skills (for comparison lists)
+    for col, new_col in [('Bat_Score', 'Bat_Rating'), ('Bowl_Score', 'Bowl_Rating'), ('Fielding_Score', 'Field_Rating')]:
+        mean_val = valid[col].mean()
+        std_val = valid[col].std() or 1
+        valid[new_col] = 20.0 + ((valid[col] - mean_val) / std_val) * 3.33
+        valid[new_col] = valid[new_col].clip(lower=10.0, upper=30.0).round(1)
+
     valid['Tier'] = pd.cut(valid['AI Rating'], bins=[0, 16.9, 22.9, 26.9, 31], labels=["Bronze", "Silver", "Gold", "Platinum"])
     
     return valid
@@ -341,7 +347,7 @@ with tab4:
         st.info("Data required.")
     else:
         st.subheader("📝 Committee Scouting (10-30 Scale)")
-        st.write("Rate the player's disciplines from 10.0 to 30.0. The engine will calculate the final score automatically based on the selected role using the BPL methodology.")
+        st.write("Rate the player's disciplines. The engine will calculate the final score automatically based on the selected role using the BPL methodology.")
         
         sc1, sc2 = st.columns(2)
         evaluator = sc1.selectbox("Select Your Name", auth_users)
@@ -351,7 +357,6 @@ with tab4:
         existing_data = human_ratings.get(scout_player, {}).get(evaluator, {})
         if not isinstance(existing_data, dict): existing_data = {}
         
-        # Default role should match the AI's determined role for convenience
         engine_role = "Batter"
         if scout_player in master_df['Player'].values:
             engine_role = master_df[master_df['Player'] == scout_player].iloc[0]['Role']
@@ -363,11 +368,32 @@ with tab4:
         
         sel_role = st.selectbox("Assign Player Role", ["Batter", "Bowler", "All-Rounder"], index=["Batter", "Bowler", "All-Rounder"].index(def_role))
         
-        st.markdown("##### Assign Skill Ratings")
+        st.markdown("##### Assign Skill Ratings & Compare with AI Peers")
         c_bat, c_bowl, c_fld = st.columns(3)
-        with c_bat: val_bat = st.slider("Batting Rating", 10.0, 30.0, float(def_bat), step=0.5)
-        with c_bowl: val_bowl = st.slider("Bowling Rating", 10.0, 30.0, float(def_bowl), step=0.5)
-        with c_fld: val_fld = st.slider("Fielding Rating", 10.0, 30.0, float(def_field), step=0.5)
+        
+        def display_peer_slider(col_obj, title, def_val, skill_col):
+            with col_obj:
+                val = st.slider(title, 10.0, 30.0, float(def_val), step=0.5)
+                
+                # Fetch peers dynamically based on slider position
+                min_v, max_v = val - 1.5, val + 1.5
+                peers = master_df[(master_df[skill_col] >= min_v) & (master_df[skill_col] <= max_v)].copy()
+                
+                if peers.empty:
+                    st.caption(f"*No AI peers in {min_v:.1f} - {max_v:.1f} range.*")
+                else:
+                    # Sort by closest mathematical match to the slider
+                    peers['diff'] = abs(peers[skill_col] - val)
+                    top_peers = peers.sort_values('diff').head(6)
+                    
+                    # Format list of peers for the UI
+                    peer_str = ", ".join([f"{r['Player']} ({r[skill_col]:.1f})" for _, r in top_peers.iterrows()])
+                    st.caption(f"**🔍 AI Peers ({min_v:.1f}-{max_v:.1f}):**<br>{peer_str}", unsafe_allow_html=True)
+                return val
+
+        val_bat = display_peer_slider(c_bat, "Batting Rating", def_bat, "Bat_Rating")
+        val_bowl = display_peer_slider(c_bowl, "Bowling Rating", def_bowl, "Bowl_Rating")
+        val_fld = display_peer_slider(c_fld, "Fielding Rating", def_field, "Field_Rating")
         
         # Mathematical Calculation mirroring the AI Engine
         if sel_role == 'Batter': 
@@ -375,7 +401,6 @@ with tab4:
         elif sel_role == 'Bowler': 
             calc_final = (val_bowl * 0.85) + (val_fld * 0.15)
         else: 
-            # All-Rounder calculation applies the 1.3x multiplier but strictly caps at 30.0
             raw_ar = (val_bat * 0.425) + (val_bowl * 0.425) + (val_fld * 0.15)
             calc_final = min(30.0, raw_ar * 1.3)
             
