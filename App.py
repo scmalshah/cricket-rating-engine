@@ -18,6 +18,7 @@ USERS_FILE = "authorized_users.json"
 WEIGHTS_FILE = "algo_weights.json"
 LEADERSHIP_FILE = "leadership.json"
 POOL_FILE = "pool_status.json"
+OVERRIDES_FILE = "scout_overrides.json"
 
 ADMIN_PASSWORD = "bpladmin" 
 
@@ -68,6 +69,15 @@ def update_cap_settings():
         cw["team_budget"] = st.session_state.cap_budget
         save_json(WEIGHTS_FILE, cw)
 
+def extract_name(val):
+    v_str = str(val).strip()
+    if not v_str or pd.isna(val) or v_str == "None" or v_str == "--- CLEAR PICK ---": 
+        return ""
+    v_str = v_str.replace("🔒 ", "").replace("🔒", "")
+    if " (" in v_str and v_str.endswith(")"):
+        return v_str.rsplit(" (", 1)[0].strip()
+    return v_str.strip()
+
 # --- LOAD STATES ---
 saved_mapping = load_json(MAPPING_FILE, {})
 mapping_changed = False
@@ -81,6 +91,7 @@ draft_state = load_json(DRAFT_FILE, {})
 leadership_state = load_json(LEADERSHIP_FILE, {})
 pool_state = load_json(POOL_FILE, {})
 human_ratings = load_json(RATINGS_FILE, {}) 
+scout_overrides = load_json(OVERRIDES_FILE, {})
 auth_users = load_json(USERS_FILE, ["Admin", "Captain 1", "Captain 2"])
 TEAMS = ["Available", "Team 1", "Team 2", "Team 3", "Team 4", "Team 5"]
 
@@ -273,20 +284,20 @@ raw_bat_cache, raw_bowl_cache, raw_field_cache, all_raw_names = get_raw_excel_da
 master_df = calculate_ratings(raw_bat_cache, raw_bowl_cache, raw_field_cache, saved_mapping, algo_weights)
 
 if not master_df.empty:
-    def get_avg_scout(player_name):
-        evals = human_ratings.get(player_name, {})
-        if not evals: return None
-        total, count = 0, 0
-        for e, data in evals.items():
-            if isinstance(data, dict) and "Final" in data:
-                total += data["Final"]
-                count += 1
-        return round(total / count, 1) if count > 0 else None
-    
-    master_df['Avg Scout Score'] = master_df['Player'].apply(get_avg_scout)
     master_df['Draft Status'] = master_df['Player'].apply(lambda x: draft_state.get(x, "Available"))
     master_df['Leadership'] = master_df['Player'].apply(lambda x: leadership_state.get(x, "None"))
     master_df['Pool Status'] = master_df['Player'].apply(lambda x: pool_state.get(x, "Team Player"))
+    
+    # Extract Individual Scout Ratings dynamically
+    for u in auth_users:
+        master_df[u] = master_df['Player'].apply(lambda x: human_ratings.get(x, {}).get(u, {}).get('Final', np.nan))
+    
+    # Calculate Average and Apply Overrides
+    master_df['Avg Scout Score'] = master_df[auth_users].mean(axis=1)
+    master_df['Scout Override'] = master_df['Player'].apply(lambda x: scout_overrides.get(x, np.nan))
+    
+    # Final Scout Rating prioritizes Override, falls back to Average Scout Score
+    master_df['Final Scout Rating'] = master_df['Scout Override'].combine_first(master_df['Avg Scout Score'])
 
 # --- BULLETPROOF DICTIONARY MAPPERS ---
 player_to_string_map = {}
@@ -294,7 +305,6 @@ string_to_player_map = {"--- CLEAR PICK ---": "", "": ""}
 
 if not master_df.empty:
     for _, row in master_df.iterrows():
-        # Clean formatting, no lock emojis!
         disp_string = f"{row['Player']} ({row['AI Rating']:.1f})"
         player_to_string_map[row['Player']] = disp_string
         string_to_player_map[disp_string] = row['Player']
@@ -326,35 +336,37 @@ with tab1:
 
         disp_df['Player'] = disp_df.apply(lambda r: f"{r['Player']} (C)" if r['Leadership'] == 'Captain' else (f"{r['Player']} (VC)" if r['Leadership'] == 'Vice Captain' else r['Player']), axis=1)
 
+        # Dynamic Column Ordering (Injecting Individual Evaluators and Overrides)
         col_order = [
             'Player', 'Role', 'Tier', 'Pool Status',
             'Runs_bat', 'Bat Avg', 'SR_bat', 'Boundary_Pct',
             'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 'Extras_Rate',
-            'Total_Fielding', 
-            'Bat_Rating', 'Bowl_Rating', 'Field_Rating', 'Avg Scout Score', 'AI Rating', 
-            'Draft Status'
-        ]
+            'Total_Fielding', 'AI Rating'
+        ] + auth_users + ['Avg Scout Score', 'Scout Override', 'Final Scout Rating', 'Draft Status']
+        
         disp_df = disp_df[col_order].sort_values('AI Rating', ascending=False)
         
-        disp_df.columns = [
-            'Player', 'Role', 'Tier', 'Pool Status',
-            'Runs', 'Bat Avg', 'Bat SR', 'Bound %',
-            'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 'Extras/Ov',
-            'Fielding', 
-            'Bat Rtg', 'Bowl Rtg', 'Field Rtg', 'Scout Rating', 'AI Rating', 
-            'Draft Status'
-        ]
-        
+        # Friendly Headers
+        rename_cols = {
+            'Runs_bat': 'Runs', 'SR_bat': 'Bat SR', 'Boundary_Pct': 'Bound %',
+            'Bowl Avg': 'Bowl Avg', 'Bowl SR': 'Bowl SR', 'Econ': 'Econ', 'Extras_Rate': 'Extras/Ov',
+            'Total_Fielding': 'Fielding'
+        }
+        disp_df.rename(columns=rename_cols, inplace=True)
         disp_df = disp_df.set_index('Player')
         
-        styled_df = disp_df.style.background_gradient(subset=['AI Rating'], cmap='RdYlGn', vmin=10, vmax=30)\
-            .format({
-                'Runs': '{:.0f}', 'Wkts': '{:.0f}', 'Fielding': '{:.0f}',
-                'Bat Avg': '{:.2f}', 'Bat SR': '{:.1f}', 'Bound %': '{:.1f}%',
-                'Bowl Avg': '{:.2f}', 'Bowl SR': '{:.1f}', 'Econ': '{:.2f}', 'Extras/Ov': '{:.2f}',
-                'Bat Rtg': '{:.1f}', 'Bowl Rtg': '{:.1f}', 'Field Rtg': '{:.1f}',
-                'Scout Rating': '{:.1f}', 'AI Rating': '{:.1f}'
-            }, na_rep="-")
+        # Dynamic Formatting Dict for Pandas Styler
+        fmt_dict = {
+            'Runs': '{:.0f}', 'Wkts': '{:.0f}', 'Fielding': '{:.0f}',
+            'Bat Avg': '{:.2f}', 'Bat SR': '{:.1f}', 'Bound %': '{:.1f}%',
+            'Bowl Avg': '{:.2f}', 'Bowl SR': '{:.1f}', 'Econ': '{:.2f}', 'Extras/Ov': '{:.2f}',
+            'AI Rating': '{:.1f}', 'Avg Scout Score': '{:.1f}', 'Scout Override': '{:.1f}', 'Final Scout Rating': '{:.1f}'
+        }
+        for u in auth_users:
+            fmt_dict[u] = '{:.1f}'
+            
+        styled_df = disp_df.style.background_gradient(subset=['AI Rating', 'Final Scout Rating'], cmap='RdYlGn', vmin=10, vmax=30)\
+            .format(fmt_dict, na_rep="-")
             
         st.dataframe(styled_df, use_container_width=True)
 
@@ -418,23 +430,20 @@ with tab2:
         st.markdown("#### 📋 Official Draft Board Grid")
         st.write("Click an empty cell to pick a player. If you need to remove someone, select **`--- CLEAR PICK ---`**.")
         
-        # Display Errors safely
         if "draft_error" in st.session_state:
             st.error(st.session_state.draft_error)
             del st.session_state.draft_error
 
-        # 1. Initialize empty grid structure
         grid_df = pd.DataFrame(index=[f"Round {i+1}" for i in range(squad_size)])
         for t in valid_teams:
             grid_df[t] = ""
             grid_df[f"{t} Rtg"] = np.nan
 
-        # 2. Pre-fill grid with EXACT mapped strings (No Emojis!)
+        # Pre-fill grid with EXACT mapped strings
         for t in valid_teams:
             t_players = [p for p, team in draft_state.items() if team == t]
             for i, p_name in enumerate(t_players):
                 if i < squad_size:
-                    # Using the bulletproof map
                     mapped_string = player_to_string_map.get(p_name, p_name)
                     grid_df.iat[i, grid_df.columns.get_loc(t)] = mapped_string
                     
@@ -442,7 +451,6 @@ with tab2:
                     if not p_match.empty:
                         grid_df.iat[i, grid_df.columns.get_loc(f"{t} Rtg")] = float(p_match.iloc[0]['AI Rating'])
 
-        # 3. Build Available Options
         avail_team_players = master_df[(master_df['Draft Status'] == "Available") & (master_df['Pool Status'] == "Team Player")].sort_values('AI Rating', ascending=False)
         avail_opts = [player_to_string_map[row['Player']] for _, row in avail_team_players.iterrows()]
 
@@ -451,19 +459,15 @@ with tab2:
             t_drafted = [p for p, team in draft_state.items() if team == t]
             t_drafted_opts = [player_to_string_map.get(p, p) for p in t_drafted]
             
-            # Options perfectly match the grid_df text!
             opts = ["--- CLEAR PICK ---"] + t_drafted_opts + avail_opts
             col_config[t] = st.column_config.SelectboxColumn(f"{t} Name", options=opts, required=False)
             col_config[f"{t} Rtg"] = st.column_config.Column("Ratings", disabled=True)
 
-        # Apply Heatmap
         rtg_cols = [f"{t} Rtg" for t in valid_teams]
         styled_grid = grid_df.style.background_gradient(subset=rtg_cols, cmap='RdYlGn', vmin=10, vmax=30).format({c: "{:.1f}" for c in rtg_cols}, na_rep="")
 
-        # Render Grid
         edited_grid = st.data_editor(styled_grid, column_config=col_config, use_container_width=True, key="live_grid")
 
-        # 4. Check for User Edits
         grid_changed = False
         for t in valid_teams:
             for i in range(squad_size):
@@ -477,23 +481,16 @@ with tab2:
             has_error = False
             new_draft_state = draft_state.copy()
             
-            # Analyze changes for all teams
             for t in valid_teams:
-                # Clear this team's current players out of the proposed state
                 for p, team in list(new_draft_state.items()):
-                    if team == t:
-                        del new_draft_state[p]
+                    if team == t: del new_draft_state[p]
                 
-                # Gather the new team roster from the grid edit
                 t_players = []
                 for i in range(squad_size):
                     val = edited_grid.iat[i, edited_grid.columns.get_loc(t)]
-                    # Safely map the string back to the pure player name!
                     clean_name = string_to_player_map.get(val, "")
-                    if clean_name:
-                        t_players.append(clean_name)
+                    if clean_name: t_players.append(clean_name)
                 
-                # Validation checks
                 if len(t_players) != len(set(t_players)):
                     st.session_state.draft_error = f"❌ REJECTED: Duplicate pick detected for {t}."
                     has_error = True
@@ -514,17 +511,12 @@ with tab2:
                     has_error = True
                     break
                     
-                # If valid, inject the roster back into the proposed state
-                for p in t_players:
-                    new_draft_state[p] = t
+                for p in t_players: new_draft_state[p] = t
 
-            # 5. Process Outcome
             if has_error:
-                # ONLY clear cache if there is an error to force it to revert the bad pick
                 if "live_grid" in st.session_state: del st.session_state["live_grid"]
                 st.rerun()
             else:
-                # SUCCESS! Save state and rerun naturally. The cell will NOT blank.
                 save_json(DRAFT_FILE, new_draft_state)
                 st.rerun()
 
@@ -569,6 +561,7 @@ with tab4:
                 st.markdown(f"### {p_data['Player']} {tag}")
                 st.markdown(f"**Role:** {p_data['Role']} | **Tier:** {p_data['Tier']} | **Status:** {p_data['Pool Status']}")
                 st.markdown(f"**AI Rating:** {p_data['AI Rating']:.1f}/30.0")
+                st.markdown(f"**Final Scout Rating:** {p_data['Final Scout Rating']:.1f}")
                 st.markdown(f"**Drafted To:** {p_data['Draft Status']}")
                 st.markdown("---")
                 st.markdown(f"**Total Runs:** {int(p_data['Runs_bat'])} *(Avg: {p_data['Bat Avg']:.2f}, SR: {p_data['SR_bat']:.1f}, Bound %: {p_data['Boundary_Pct']:.1f}%)*")
@@ -584,8 +577,6 @@ with tab4:
                     for evaluator, data in scores.items():
                         if isinstance(data, dict):
                             st.write(f"- **{evaluator} ({data.get('Final', 0):.1f})** | *{data.get('Role')} | Bat: {data.get('Bat')}, Bowl: {data.get('Bowl')}, Field: {data.get('Field')}*")
-                        else:
-                            st.write(f"- **{evaluator}**: Legacy Score Ignored")
 
             with pc2:
                 categories = ['Batting Volume', 'Strike Rate', 'Boundary Threat', 'Wicket Taking', 'Economy (Reversed)', 'Bowling Discipline', 'Fielding Impact']
@@ -614,74 +605,90 @@ with tab5:
     if master_df.empty:
         st.info("Data required.")
     else:
-        st.subheader("📝 Committee Scouting (10-30 Scale)")
-        st.write("Rate the player's disciplines. The engine will calculate the final score automatically.")
+        st.subheader("📝 Mass Committee Scouting & Overrides")
+        st.write("Rate players individually or override the committee's final score completely.")
         
-        sc1, sc2 = st.columns(2)
-        evaluator = sc1.selectbox("Select Your Name", auth_users)
-        scout_player = sc2.selectbox("Select Player to Rate", master_df.sort_values('Player')['Player'])
+        evaluator = st.selectbox("Select Your Name", auth_users)
         
-        existing_data = human_ratings.get(scout_player, {}).get(evaluator, {})
-        if not isinstance(existing_data, dict): existing_data = {}
+        st.markdown(f"### Evaluating as: **{evaluator}**")
+        st.write("Edit your scores directly in the table below. The AI Ratings (Bat/Bowl/Field/Total) are provided next to your columns to serve as your peer benchmarking tool. You do not need to fill out all columns; you can jump straight to 'My Final Score' if you prefer.")
         
-        engine_role = "Batter"
-        if scout_player in master_df['Player'].values:
-            engine_role = master_df[master_df['Player'] == scout_player].iloc[0]['Role']
+        # Build DataFrame for the current evaluator
+        scout_records = []
+        for _, row in master_df.iterrows():
+            p_name = row['Player']
+            e_data = human_ratings.get(p_name, {}).get(evaluator, {})
             
-        def_role = existing_data.get("Role", engine_role)
-        def_bat = existing_data.get("Bat", 20.0)
-        def_bowl = existing_data.get("Bowl", 20.0)
-        def_field = existing_data.get("Field", 20.0)
+            scout_records.append({
+                "Player": p_name,
+                "Role": row['Role'],
+                "AI Bat Rtg": float(row['Bat_Rating']),
+                "AI Bowl Rtg": float(row['Bowl_Rating']),
+                "AI Field Rtg": float(row['Field_Rating']),
+                "AI Total": float(row['AI Rating']),
+                "My Bat": e_data.get("Bat", None),
+                "My Bowl": e_data.get("Bowl", None),
+                "My Field": e_data.get("Field", None),
+                "My Final Score": e_data.get("Final", None),
+                "Avg Scout Score": row['Avg Scout Score'],
+                "Master Override": scout_overrides.get(p_name, None)
+            })
+            
+        scout_df = pd.DataFrame(scout_records)
         
-        sel_role = st.selectbox("Assign Player Role", ["Batter", "Bowler", "All-Rounder"], index=["Batter", "Bowler", "All-Rounder"].index(def_role))
+        s_config = {
+            "Player": st.column_config.Column(disabled=True),
+            "Role": st.column_config.Column(disabled=True),
+            "AI Bat Rtg": st.column_config.NumberColumn(disabled=True, format="%.1f"),
+            "AI Bowl Rtg": st.column_config.NumberColumn(disabled=True, format="%.1f"),
+            "AI Field Rtg": st.column_config.NumberColumn(disabled=True, format="%.1f"),
+            "AI Total": st.column_config.NumberColumn(disabled=True, format="%.1f"),
+            "Avg Scout Score": st.column_config.NumberColumn(disabled=True, format="%.1f"),
+            "My Bat": st.column_config.NumberColumn("My Bat", min_value=10.0, max_value=30.0, step=0.1),
+            "My Bowl": st.column_config.NumberColumn("My Bowl", min_value=10.0, max_value=30.0, step=0.1),
+            "My Field": st.column_config.NumberColumn("My Field", min_value=10.0, max_value=30.0, step=0.1),
+            "My Final Score": st.column_config.NumberColumn("My Final Score", min_value=10.0, max_value=30.0, step=0.1),
+            "Master Override": st.column_config.NumberColumn("Master Override", min_value=10.0, max_value=30.0, step=0.1)
+        }
         
-        st.markdown("##### Assign Skill Ratings & Compare with AI Peers")
-        c_bat, c_bowl, c_fld = st.columns(3)
+        # Color specific columns to guide the eye
+        styled_scout = scout_df.style.set_properties(subset=['AI Total', 'Avg Scout Score'], **{'background-color': '#f8f9fa'}) \
+            .set_properties(subset=['My Final Score', 'Master Override'], **{'background-color': '#e6f2ff'})
         
-        def display_peer_slider(col_obj, title, def_val, skill_col):
-            with col_obj:
-                val = st.slider(title, 10.0, 30.0, float(def_val), step=0.5)
-                min_v, max_v = val - 1.5, val + 1.5
-                peers = master_df[(master_df[skill_col] >= min_v) & (master_df[skill_col] <= max_v)].copy()
+        edited_scout = st.data_editor(styled_scout, column_config=s_config, hide_index=True, use_container_width=True, height=600)
+        
+        if st.button("💾 Save All Scouting Data", type="primary"):
+            for _, row in edited_scout.iterrows():
+                p_name = row['Player']
                 
-                if peers.empty:
-                    st.caption(f"*No AI peers in {min_v:.1f} - {max_v:.1f} range.*")
-                else:
-                    peers['diff'] = abs(peers[skill_col] - val)
-                    top_peers = peers.sort_values('diff').head(6)
-                    peer_str = ", ".join([f"{r['Player']} ({r[skill_col]:.1f})" for _, r in top_peers.iterrows()])
-                    st.caption(f"**🔍 AI Peers ({min_v:.1f}-{max_v:.1f}):**<br>{peer_str}", unsafe_allow_html=True)
-                return val
+                # Extract Evaluator Data
+                my_bat = row['My Bat']
+                my_bowl = row['My Bowl']
+                my_fld = row['My Field']
+                my_fin = row['My Final Score']
+                
+                # Check if user entered anything
+                if pd.notna(my_bat) or pd.notna(my_bowl) or pd.notna(my_fld) or pd.notna(my_fin):
+                    if p_name not in human_ratings: human_ratings[p_name] = {}
+                    
+                    human_ratings[p_name][evaluator] = {
+                        "Role": row['Role'],
+                        "Bat": float(my_bat) if pd.notna(my_bat) else 20.0,
+                        "Bowl": float(my_bowl) if pd.notna(my_bowl) else 20.0,
+                        "Field": float(my_fld) if pd.notna(my_fld) else 20.0,
+                        "Final": float(my_fin) if pd.notna(my_fin) else 20.0
+                    }
+                    
+                # Extract Master Override Data
+                m_override = row['Master Override']
+                if pd.notna(m_override):
+                    scout_overrides[p_name] = float(m_override)
+                elif p_name in scout_overrides:
+                    del scout_overrides[p_name] # Remove override if they deleted it
 
-        val_bat = display_peer_slider(c_bat, "Batting Rating", def_bat, "Bat_Rating")
-        val_bowl = display_peer_slider(c_bowl, "Bowling Rating", def_bowl, "Bowl_Rating")
-        val_fld = display_peer_slider(c_fld, "Fielding Rating", def_field, "Field_Rating")
-        
-        w = algo_weights
-        if sel_role == 'Batter': 
-            tot = w['wt_batter_bat'] + w['wt_batter_field'] or 1
-            calc_final = (val_bat * (w['wt_batter_bat']/tot)) + (val_fld * (w['wt_batter_field']/tot))
-        elif sel_role == 'Bowler': 
-            tot = w['wt_bowler_bowl'] + w['wt_bowler_field'] or 1
-            calc_final = (val_bowl * (w['wt_bowler_bowl']/tot)) + (val_fld * (w['wt_bowler_field']/tot))
-        else: 
-            tot = w['wt_ar_bat'] + w['wt_ar_bowl'] + w['wt_ar_field'] or 1
-            raw_ar = (val_bat * (w['wt_ar_bat']/tot)) + (val_bowl * (w['wt_ar_bowl']/tot)) + (val_fld * (w['wt_ar_field']/tot))
-            calc_final = min(30.0, raw_ar * w['ar_multiplier'])
-            
-        st.info(f"**Calculated Final Scout Rating:** {calc_final:.1f} / 30.0")
-        
-        if st.button("Save Rating", type="primary"):
-            if scout_player not in human_ratings: human_ratings[scout_player] = {}
-            human_ratings[scout_player][evaluator] = {
-                "Role": sel_role,
-                "Bat": val_bat,
-                "Bowl": val_bowl,
-                "Field": val_fld,
-                "Final": float(round(calc_final, 1))
-            }
             save_json(RATINGS_FILE, human_ratings)
-            st.success(f"Score detailed breakdown saved for {scout_player}!")
+            save_json(OVERRIDES_FILE, scout_overrides)
+            st.success("✅ Bulk evaluations and overrides saved successfully!")
             st.rerun()
 
 # --- TAB 6: METHODOLOGY ---
@@ -861,7 +868,8 @@ with tab7:
                 "ratings": load_json(RATINGS_FILE, {}),
                 "weights": load_json(WEIGHTS_FILE, DEFAULT_WEIGHTS),
                 "leadership": load_json(LEADERSHIP_FILE, {}),
-                "pool": load_json(POOL_FILE, {})
+                "pool": load_json(POOL_FILE, {}),
+                "overrides": load_json(OVERRIDES_FILE, {})
             }
             backup_json = json.dumps(backup_data, indent=2).encode('utf-8')
             st.download_button(
@@ -882,5 +890,6 @@ with tab7:
                 if "weights" in restore_data: save_json(WEIGHTS_FILE, restore_data.get("weights", {}))
                 if "leadership" in restore_data: save_json(LEADERSHIP_FILE, restore_data.get("leadership", {}))
                 if "pool" in restore_data: save_json(POOL_FILE, restore_data.get("pool", {}))
+                if "overrides" in restore_data: save_json(OVERRIDES_FILE, restore_data.get("overrides", {}))
                 st.success("✅ Server state fully restored!")
                 st.rerun()
