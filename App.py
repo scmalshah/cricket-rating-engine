@@ -15,6 +15,7 @@ MAPPING_FILE = "name_mapping.json"
 DRAFT_FILE = "draft_state.json"
 RATINGS_FILE = "human_ratings.json"
 USERS_FILE = "authorized_users.json"
+WEIGHTS_FILE = "algo_weights.json"
 
 ADMIN_PASSWORD = "bpladmin" 
 
@@ -23,6 +24,14 @@ DEFAULT_MAPPINGS = {
     "Praveen Starkey": "Praveenraj Starkey (Merged)",
     "Godwin .": "Godwin (Merged)",
     "Godwin M": "Godwin (Merged)"
+}
+
+DEFAULT_WEIGHTS = {
+    "bat_runs": 20.0, "bat_avg": 30.0, "bat_sr": 25.0, "bat_bpd": 10.0, "bat_bound": 15.0,
+    "bowl_wkts": 30.0, "bowl_econ": 25.0, "bowl_avg": 20.0, "bowl_sr": 15.0, "bowl_extras": 10.0,
+    "wt_batter_bat": 85.0, "wt_batter_field": 15.0,
+    "wt_bowler_bowl": 85.0, "wt_bowler_field": 15.0,
+    "wt_ar_bat": 42.5, "wt_ar_bowl": 42.5, "wt_ar_field": 15.0, "ar_multiplier": 1.3
 }
 
 # --- HELPER FUNCTIONS ---
@@ -56,13 +65,17 @@ for original, merged in DEFAULT_MAPPINGS.items():
     if original not in saved_mapping:
         saved_mapping[original] = merged
         mapping_changed = True
-if mapping_changed:
-    save_json(MAPPING_FILE, saved_mapping)
+if mapping_changed: save_json(MAPPING_FILE, saved_mapping)
 
 draft_state = load_json(DRAFT_FILE, {}) 
 human_ratings = load_json(RATINGS_FILE, {}) 
 auth_users = load_json(USERS_FILE, ["Admin", "Captain 1", "Captain 2"])
 TEAMS = ["Available", "Team 1", "Team 2", "Team 3", "Team 4", "Team 5"]
+
+algo_weights = load_json(WEIGHTS_FILE, DEFAULT_WEIGHTS)
+# Ensure any missing keys in an old save get populated with defaults
+for k, v in DEFAULT_WEIGHTS.items():
+    if k not in algo_weights: algo_weights[k] = v
 
 # --- HEADER ---
 st.title("🏏 BPL Cricket Rating Engine")
@@ -98,8 +111,8 @@ def get_raw_excel_data(file_mod_time):
     
     return raw_bat, raw_bowl, raw_field, sorted(list(raw_names))
 
-@st.cache_data(show_spinner="Crunching AI Ratings...")
-def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping):
+@st.cache_data(show_spinner="Crunching AI Ratings with Custom Weights...")
+def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w):
     if raw_bat.empty and raw_bowl.empty: return pd.DataFrame()
     
     rbat, rbowl, rfield = raw_bat.copy(), raw_bowl.copy(), raw_field.copy()
@@ -133,7 +146,7 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping):
     
     agg_bat = rbat.groupby('Player').agg(**bat_agg_kwargs).reset_index()
 
-    # Find and Aggregate Extras (Wides and No Balls)
+    # Aggregate Bowling
     extras = np.zeros(len(rbowl))
     if not rbowl.empty:
         for col in rbowl.columns:
@@ -165,7 +178,6 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping):
     valid = valid[(valid['Balls_Faced'] >= 12) | (valid['Balls_Bowled'] >= 18)].copy()
     if valid.empty: return pd.DataFrame()
 
-    # Ensure Boundary Columns exist for calculation
     if 'Fours' not in valid.columns: valid['Fours'] = 0
     if 'Sixes' not in valid.columns: valid['Sixes'] = 0
     
@@ -191,7 +203,6 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping):
     valid['Sm_SR'] = ((valid['Runs_bat'] + ((valid['Runs_bat'].sum() / (valid['Balls_Faced'].sum() or 1) * 100) / 100 * 30)) / (valid['Balls_Faced'] + 30)) * 100
     valid['Sm_BPD'] = (valid['Balls_Faced'] + (mean_bpd * 3)) / (valid['Dismissals'] + 3)
     
-    # Smoothing for Boundaries (injecting 50 runs of league-average boundary hitting)
     league_bound_pct = valid['Bound_Runs'].sum() / (valid['Runs_bat'].sum() or 1)
     valid['Sm_Boundary'] = ((valid['Bound_Runs'] + (league_bound_pct * 50)) / (valid['Runs_bat'] + 50)) * 100
     
@@ -210,24 +221,33 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping):
     z_wkts = (valid['Wkts'] - valid['Wkts'].mean()) / (valid['Wkts'].std() or 1)
     z_econ = (valid['Sm_Econ'].mean() - valid['Sm_Econ']) / (valid['Sm_Econ'].std() or 1)
     z_avg_bowl = (valid['Sm_Avg_bowl'].mean() - valid['Sm_Avg_bowl']) / (valid['Sm_Avg_bowl'].std() or 1)
-    z_bowl_sr = (valid['Sm_Bowl_SR'].mean() - valid['Sm_Bowl_SR']) / (valid['Sm_Bowl_SR'].std() or 1) # Reversed
-    z_extras = (valid['Sm_Extras'].mean() - valid['Sm_Extras']) / (valid['Sm_Extras'].std() or 1) # Reversed
+    z_bowl_sr = (valid['Sm_Bowl_SR'].mean() - valid['Sm_Bowl_SR']) / (valid['Sm_Bowl_SR'].std() or 1) 
+    z_extras = (valid['Sm_Extras'].mean() - valid['Sm_Extras']) / (valid['Sm_Extras'].std() or 1) 
     
     valid['Fielding_Score'] = (valid['Total_Fielding'] - valid['Total_Fielding'].mean()) / (valid['Total_Fielding'].std() or 1)
 
-    # Calculate Individual Discipline Scores
-    valid['Bat_Score'] = (z_runs * 0.20) + (z_avg * 0.30) + (z_sr * 0.25) + (z_bpd * 0.10) + (z_bound * 0.15)
-    valid['Bowl_Score'] = (z_wkts * 0.30) + (z_econ * 0.25) + (z_avg_bowl * 0.20) + (z_bowl_sr * 0.15) + (z_extras * 0.10)
+    # --- DYNAMIC NORMALIZATION & WEIGHT CALCULATION ---
+    bat_tot = w['bat_runs'] + w['bat_avg'] + w['bat_sr'] + w['bat_bpd'] + w['bat_bound'] or 1
+    bowl_tot = w['bowl_wkts'] + w['bowl_econ'] + w['bowl_avg'] + w['bowl_sr'] + w['bowl_extras'] or 1
     
-    valid['Boundary_Score'] = z_bound # Stored for Radar Chart
+    valid['Bat_Score'] = (z_runs * (w['bat_runs']/bat_tot)) + (z_avg * (w['bat_avg']/bat_tot)) + (z_sr * (w['bat_sr']/bat_tot)) + (z_bpd * (w['bat_bpd']/bat_tot)) + (z_bound * (w['bat_bound']/bat_tot))
+    valid['Bowl_Score'] = (z_wkts * (w['bowl_wkts']/bowl_tot)) + (z_econ * (w['bowl_econ']/bowl_tot)) + (z_avg_bowl * (w['bowl_avg']/bowl_tot)) + (z_bowl_sr * (w['bowl_sr']/bowl_tot)) + (z_extras * (w['bowl_extras']/bowl_tot))
+    valid['Boundary_Score'] = z_bound 
 
-    # Role & Final Logic
+    # Role Logic
     valid['Role'] = valid.apply(lambda r: 'All-Rounder' if r['Balls_Faced'] >= 15 and r['Balls_Bowled'] >= 18 else ('Bowler' if r['Balls_Bowled'] >= 18 else 'Batter'), axis=1)
     
     def calc_final(r):
-        if r['Role'] == 'Batter': return (r['Bat_Score'] * 0.85) + (r['Fielding_Score'] * 0.15)
-        elif r['Role'] == 'Bowler': return (r['Bowl_Score'] * 0.85) + (r['Fielding_Score'] * 0.15)
-        else: return ((r['Bat_Score'] * 0.425) + (r['Bowl_Score'] * 0.425) + (r['Fielding_Score'] * 0.15)) * 1.3
+        if r['Role'] == 'Batter': 
+            tot = w['wt_batter_bat'] + w['wt_batter_field'] or 1
+            return (r['Bat_Score'] * (w['wt_batter_bat']/tot)) + (r['Fielding_Score'] * (w['wt_batter_field']/tot))
+        elif r['Role'] == 'Bowler': 
+            tot = w['wt_bowler_bowl'] + w['wt_bowler_field'] or 1
+            return (r['Bowl_Score'] * (w['wt_bowler_bowl']/tot)) + (r['Fielding_Score'] * (w['wt_bowler_field']/tot))
+        else: 
+            tot = w['wt_ar_bat'] + w['wt_ar_bowl'] + w['wt_ar_field'] or 1
+            base = (r['Bat_Score'] * (w['wt_ar_bat']/tot)) + (r['Bowl_Score'] * (w['wt_ar_bowl']/tot)) + (r['Fielding_Score'] * (w['wt_ar_field']/tot))
+            return base * w['ar_multiplier']
         
     valid['Final_Raw'] = valid.apply(calc_final, axis=1)
 
@@ -238,7 +258,6 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping):
     valid['AI Rating'] = 20.0 + ((valid['Final_Raw'] - mean_raw) / std_raw) * 3.33
     valid['AI Rating'] = valid['AI Rating'].clip(lower=10.0, upper=30.0).round(1)
     
-    # Calculate 10-30 scale for individual skills
     for col, new_col in [('Bat_Score', 'Bat_Rating'), ('Bowl_Score', 'Bowl_Rating'), ('Fielding_Score', 'Field_Rating')]:
         mean_val = valid[col].mean()
         std_val = valid[col].std() or 1
@@ -246,13 +265,14 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping):
         valid[new_col] = valid[new_col].clip(lower=10.0, upper=30.0).round(1)
 
     valid['Tier'] = pd.cut(valid['AI Rating'], bins=[0, 16.9, 22.9, 26.9, 31], labels=["Bronze", "Silver", "Gold", "Platinum"])
-    
     return valid
 
 # Execution Engine
 file_time = os.path.getmtime(DATA_FILE) if os.path.exists(DATA_FILE) else 0
 raw_bat_cache, raw_bowl_cache, raw_field_cache, all_raw_names = get_raw_excel_data(file_time)
-master_df = calculate_ratings(raw_bat_cache, raw_bowl_cache, raw_field_cache, saved_mapping)
+
+# Notice we pass the custom weights dictionary into the calculation!
+master_df = calculate_ratings(raw_bat_cache, raw_bowl_cache, raw_field_cache, saved_mapping, algo_weights)
 
 if not master_df.empty:
     def get_avg_scout(player_name):
@@ -293,7 +313,6 @@ with tab1:
         if status_f == "Available Only": disp_df = disp_df[disp_df['Draft Status'] == "Available"]
         elif status_f != "All Players": disp_df = disp_df[disp_df['Draft Status'] == status_f]
 
-        # Formatting Output Columns including Boundary Pct
         col_order = [
             'Player', 'Role', 'Tier', 
             'Runs_bat', 'Bat Avg', 'SR_bat', 'Boundary_Pct',
@@ -317,21 +336,11 @@ with tab1:
         
         styled_df = disp_df.style.background_gradient(subset=['AI Rating'], cmap='RdYlGn', vmin=10, vmax=30)\
             .format({
-                'Runs': '{:.0f}',
-                'Wkts': '{:.0f}',
-                'Fielding': '{:.0f}',
-                'Bat Avg': '{:.2f}',
-                'Bat SR': '{:.1f}',
-                'Bound %': '{:.1f}%',
-                'Bowl Avg': '{:.2f}',
-                'Bowl SR': '{:.1f}',
-                'Econ': '{:.2f}',
-                'Extras/Ov': '{:.2f}',
-                'Bat Rtg': '{:.1f}',
-                'Bowl Rtg': '{:.1f}',
-                'Field Rtg': '{:.1f}',
-                'Scout Rating': '{:.1f}',
-                'AI Rating': '{:.1f}'
+                'Runs': '{:.0f}', 'Wkts': '{:.0f}', 'Fielding': '{:.0f}',
+                'Bat Avg': '{:.2f}', 'Bat SR': '{:.1f}', 'Bound %': '{:.1f}%',
+                'Bowl Avg': '{:.2f}', 'Bowl SR': '{:.1f}', 'Econ': '{:.2f}', 'Extras/Ov': '{:.2f}',
+                'Bat Rtg': '{:.1f}', 'Bowl Rtg': '{:.1f}', 'Field Rtg': '{:.1f}',
+                'Scout Rating': '{:.1f}', 'AI Rating': '{:.1f}'
             }, na_rep="-")
             
         st.dataframe(styled_df, use_container_width=True)
@@ -422,7 +431,7 @@ with tab4:
         st.info("Data required.")
     else:
         st.subheader("📝 Committee Scouting (10-30 Scale)")
-        st.write("Rate the player's disciplines. The engine will calculate the final score automatically based on the selected role using the BPL methodology.")
+        st.write("Rate the player's disciplines. The engine will calculate the final score automatically.")
         
         sc1, sc2 = st.columns(2)
         evaluator = sc1.selectbox("Select Your Name", auth_users)
@@ -448,7 +457,6 @@ with tab4:
         def display_peer_slider(col_obj, title, def_val, skill_col):
             with col_obj:
                 val = st.slider(title, 10.0, 30.0, float(def_val), step=0.5)
-                
                 min_v, max_v = val - 1.5, val + 1.5
                 peers = master_df[(master_df[skill_col] >= min_v) & (master_df[skill_col] <= max_v)].copy()
                 
@@ -465,13 +473,17 @@ with tab4:
         val_bowl = display_peer_slider(c_bowl, "Bowling Rating", def_bowl, "Bowl_Rating")
         val_fld = display_peer_slider(c_fld, "Fielding Rating", def_field, "Field_Rating")
         
+        w = algo_weights
         if sel_role == 'Batter': 
-            calc_final = (val_bat * 0.85) + (val_fld * 0.15)
+            tot = w['wt_batter_bat'] + w['wt_batter_field'] or 1
+            calc_final = (val_bat * (w['wt_batter_bat']/tot)) + (val_fld * (w['wt_batter_field']/tot))
         elif sel_role == 'Bowler': 
-            calc_final = (val_bowl * 0.85) + (val_fld * 0.15)
+            tot = w['wt_bowler_bowl'] + w['wt_bowler_field'] or 1
+            calc_final = (val_bowl * (w['wt_bowler_bowl']/tot)) + (val_fld * (w['wt_bowler_field']/tot))
         else: 
-            raw_ar = (val_bat * 0.425) + (val_bowl * 0.425) + (val_fld * 0.15)
-            calc_final = min(30.0, raw_ar * 1.3)
+            tot = w['wt_ar_bat'] + w['wt_ar_bowl'] + w['wt_ar_field'] or 1
+            raw_ar = (val_bat * (w['wt_ar_bat']/tot)) + (val_bowl * (w['wt_ar_bowl']/tot)) + (val_fld * (w['wt_ar_field']/tot))
+            calc_final = min(30.0, raw_ar * w['ar_multiplier'])
             
         st.info(f"**Calculated Final Scout Rating:** {calc_final:.1f} / 30.0")
         
@@ -490,29 +502,25 @@ with tab4:
 
 # --- TAB 5: METHODOLOGY ---
 with tab5:
+    w = algo_weights
     st.subheader("🧠 How the AI Rating is Calculated")
     
-    st.markdown("""
-    To create maximum separation between players and ensure a fair draft, the BPL Engine parses Batting, Bowling, and Fielding metrics, standardizes them, and forces them into a Bell-Curve distribution.
+    st.markdown(f"""
+    To create maximum separation between players and ensure a fair draft, the BPL Engine uses dynamic, customizable weighting logic.
 
-    ### 1. Expanded Core Metrics
-    The engine now calculates **8 granular data points** to separate players:
-    *   **Batting Score:** Total Runs (20%), Batting Avg (30%), Strike Rate (25%), Balls Per Dismissal (10%), and **Boundary Impact (15%)**. *(Boundary Impact rewards players who generate a massive percentage of their runs purely via 4s and 6s, breaking field placements).*
-    *   **Bowling Score:** Total Wickets (30%), Economy Rate (25%), Bowling Avg (20%), Bowling Strike Rate (15%), and **Bowling Discipline (10%)**. *(Discipline is measured by Extras Per Over, heavily penalizing bowlers who hand out free runs via Wides and No Balls).*
+    ### 1. Granular Core Metrics
+    The engine balances **8 distinct data points** dynamically based on your custom Admin settings:
+    *   **Batting Score:** Total Runs ({w['bat_runs']}%), Batting Avg ({w['bat_avg']}%), Strike Rate ({w['bat_sr']}%), Balls Per Dismissal ({w['bat_bpd']}%), and Boundary Impact ({w['bat_bound']}%).
+    *   **Bowling Score:** Total Wickets ({w['bowl_wkts']}%), Economy Rate ({w['bowl_econ']}%), Bowling Avg ({w['bowl_avg']}%), Bowling Strike Rate ({w['bowl_sr']}%), and Extras/Discipline Penalty ({w['bowl_extras']}%).
     *   **Fielding Score:** The sum of all Catches, Run-Outs, and Stumpings.
 
-    ### 2. Bayesian Smoothing & Z-Scores
-    To prevent a bowler who took 1 wicket for 2 runs (Economy 2.00) from breaking the algorithm, the engine injects "fictitious" league average stats into every player's record. 
-    
-    The engine then converts every metric into a **Z-Score** to measure exactly how many standard deviations a player is above or below the league average.
-
-    ### 3. Weights & The All-Rounder Premium
+    ### 2. Weights & The All-Rounder Premium
     Players are assigned a role based on strict minimum thresholds:
-    * **Batter (Faced 15+ balls):** Batting Score (85%) + Fielding (15%)
-    * **Bowler (Bowled 18+ balls):** Bowling Score (85%) + Fielding (15%)
-    * **All-Rounder:** `[(Batting * 42.5%) + (Bowling * 42.5%) + (Fielding * 15%)] * 1.3 Multiplier`
+    * **Batter:** Batting ({w['wt_batter_bat']}%) + Fielding ({w['wt_batter_field']}%)
+    * **Bowler:** Bowling ({w['wt_bowler_bowl']}%) + Fielding ({w['wt_bowler_field']}%)
+    * **All-Rounder:** `[Batting ({w['wt_ar_bat']}%) + Bowling ({w['wt_ar_bowl']}%) + Fielding ({w['wt_ar_field']}%)] * {w['ar_multiplier']} Multiplier`
     
-    ### 4. T-Score Distribution
+    ### 3. T-Score Distribution
     The absolute league average player is hardcoded to receive exactly a **20.0 AI Rating**. The algorithm applies a 3.33 standard deviation spread, naturally fanning the players out across the 10.0 to 30.0 range.
     """)
 
@@ -558,7 +566,56 @@ with tab6:
                 st.rerun()
 
         st.markdown("---")
-        st.markdown("### 4. 🛠️ Player Name Aliases & Merge Tool")
+        st.markdown("### 4. 🎛️ Algorithm Weight Tuning")
+        st.write("Modify the mathematical importance of each metric. The AI ratings will recalculate instantly. Inputs will auto-normalize if they do not equal 100%.")
+        
+        st.markdown("##### 🏏 Batting Metrics (%)")
+        b1, b2, b3, b4, b5 = st.columns(5)
+        w_bat_runs = b1.number_input("Total Runs", value=float(algo_weights["bat_runs"]))
+        w_bat_avg = b2.number_input("Batting Avg", value=float(algo_weights["bat_avg"]))
+        w_bat_sr = b3.number_input("Strike Rate", value=float(algo_weights["bat_sr"]))
+        w_bat_bpd = b4.number_input("Balls/Dismissal", value=float(algo_weights["bat_bpd"]))
+        w_bat_bound = b5.number_input("Boundary %", value=float(algo_weights["bat_bound"]))
+        
+        st.markdown("##### ⚾ Bowling Metrics (%)")
+        bo1, bo2, bo3, bo4, bo5 = st.columns(5)
+        w_bowl_wkts = bo1.number_input("Total Wickets", value=float(algo_weights["bowl_wkts"]))
+        w_bowl_econ = bo2.number_input("Economy", value=float(algo_weights["bowl_econ"]))
+        w_bowl_avg = bo3.number_input("Bowling Avg", value=float(algo_weights["bowl_avg"]))
+        w_bowl_sr = bo4.number_input("Bowling SR", value=float(algo_weights["bowl_sr"]))
+        w_bowl_extras = bo5.number_input("Extras Penalty", value=float(algo_weights["bowl_extras"]))
+        
+        st.markdown("##### ⚖️ Role Distribution (%) & Multiplier")
+        r1, r2, r3 = st.columns(3)
+        with r1:
+            st.markdown("**Pure Batter**")
+            w_wt_batter_bat = st.number_input("Batting % (Batter)", value=float(algo_weights["wt_batter_bat"]))
+            w_wt_batter_field = st.number_input("Fielding % (Batter)", value=float(algo_weights["wt_batter_field"]))
+        with r2:
+            st.markdown("**Pure Bowler**")
+            w_wt_bowler_bowl = st.number_input("Bowling % (Bowler)", value=float(algo_weights["wt_bowler_bowl"]))
+            w_wt_bowler_field = st.number_input("Fielding % (Bowler)", value=float(algo_weights["wt_bowler_field"]))
+        with r3:
+            st.markdown("**All-Rounder**")
+            w_wt_ar_bat = st.number_input("Batting % (AR)", value=float(algo_weights["wt_ar_bat"]))
+            w_wt_ar_bowl = st.number_input("Bowling % (AR)", value=float(algo_weights["wt_ar_bowl"]))
+            w_wt_ar_field = st.number_input("Fielding % (AR)", value=float(algo_weights["wt_ar_field"]))
+            w_ar_multiplier = st.number_input("AR Multiplier", value=float(algo_weights["ar_multiplier"]), step=0.1)
+
+        if st.button("⚙️ Save Custom Weights & Recalculate"):
+            new_weights = {
+                "bat_runs": w_bat_runs, "bat_avg": w_bat_avg, "bat_sr": w_bat_sr, "bat_bpd": w_bat_bpd, "bat_bound": w_bat_bound,
+                "bowl_wkts": w_bowl_wkts, "bowl_econ": w_bowl_econ, "bowl_avg": w_bowl_avg, "bowl_sr": w_bowl_sr, "bowl_extras": w_bowl_extras,
+                "wt_batter_bat": w_wt_batter_bat, "wt_batter_field": w_wt_batter_field,
+                "wt_bowler_bowl": w_wt_bowler_bowl, "wt_bowler_field": w_wt_bowler_field,
+                "wt_ar_bat": w_wt_ar_bat, "wt_ar_bowl": w_wt_ar_bowl, "wt_ar_field": w_wt_ar_field, "ar_multiplier": w_ar_multiplier
+            }
+            save_json(WEIGHTS_FILE, new_weights)
+            st.success("✅ Engine settings updated! Head to the Draft Board to see the shifts.")
+            st.rerun()
+
+        st.markdown("---")
+        st.markdown("### 5. 🛠️ Player Name Aliases & Merge Tool")
         st.write("Edit the **'Merged Name'** column to merge aliases dynamically.")
         if all_raw_names:
             mapping_records = [{"Original Name": n, "Merged Name": saved_mapping.get(n, n)} for n in all_raw_names]
@@ -575,7 +632,7 @@ with tab6:
             st.info("Upload an Excel file to start mapping names.")
 
         st.markdown("---")
-        st.markdown("### 5. 💾 Permanent Cloud Backup & Restore")
+        st.markdown("### 6. 💾 Permanent Cloud Backup & Restore")
         st.write("Because free servers reset when code changes, download your server state to save your mappings and rosters permanently.")
         
         bc1, bc2 = st.columns(2)
@@ -583,7 +640,8 @@ with tab6:
             backup_data = {
                 "mappings": load_json(MAPPING_FILE, DEFAULT_MAPPINGS),
                 "draft": load_json(DRAFT_FILE, {}),
-                "ratings": load_json(RATINGS_FILE, {})
+                "ratings": load_json(RATINGS_FILE, {}),
+                "weights": load_json(WEIGHTS_FILE, DEFAULT_WEIGHTS)
             }
             backup_json = json.dumps(backup_data, indent=2).encode('utf-8')
             st.download_button(
@@ -598,11 +656,11 @@ with tab6:
             restore_file = st.file_uploader("📤 Restore from Backup (.json)", type=["json"])
             if restore_file:
                 restore_data = json.load(restore_file)
-                if "mappings" in restore_data:
-                    save_json(MAPPING_FILE, restore_data.get("mappings", {}))
-                    save_json(DRAFT_FILE, restore_data.get("draft", {}))
-                    save_json(RATINGS_FILE, restore_data.get("ratings", {}))
-                    st.success("✅ Server state fully restored!")
-                    st.rerun()
+                if "mappings" in restore_data: save_json(MAPPING_FILE, restore_data.get("mappings", {}))
+                if "draft" in restore_data: save_json(DRAFT_FILE, restore_data.get("draft", {}))
+                if "ratings" in restore_data: save_json(RATINGS_FILE, restore_data.get("ratings", {}))
+                if "weights" in restore_data: save_json(WEIGHTS_FILE, restore_data.get("weights", {}))
+                st.success("✅ Server state fully restored!")
+                st.rerun()
     elif password_attempt != "":
         st.error("Incorrect password.")
