@@ -60,6 +60,13 @@ def load_json(filepath, default_val):
 def save_json(filepath, data):
     with open(filepath, "w") as f: json.dump(data, f, indent=2)
 
+def update_cap_settings():
+    if "cap_squad" in st.session_state and "cap_budget" in st.session_state:
+        cw = load_json(WEIGHTS_FILE, DEFAULT_WEIGHTS)
+        cw["squad_size"] = st.session_state.cap_squad
+        cw["team_budget"] = st.session_state.cap_budget
+        save_json(WEIGHTS_FILE, cw)
+
 # --- LOAD STATES ---
 saved_mapping = load_json(MAPPING_FILE, {})
 mapping_changed = False
@@ -303,7 +310,6 @@ with tab1:
         if status_f == "Available Only": disp_df = disp_df[disp_df['Draft Status'] == "Available"]
         elif status_f != "All Players": disp_df = disp_df[disp_df['Draft Status'] == status_f]
 
-        # Apply Visual Tags for Captains/VCs
         disp_df['Player'] = disp_df.apply(lambda r: f"{r['Player']} (C)" if r['Leadership'] == 'Captain' else (f"{r['Player']} (VC)" if r['Leadership'] == 'Vice Captain' else r['Player']), axis=1)
 
         col_order = [
@@ -356,7 +362,6 @@ with tab2:
         drafted_df = master_df[master_df['Draft Status'] != "Available"]
         num_drafted = len(drafted_df)
         
-        # Determine Snake Order Turn (Automatically accounts for pre-drafted Captains!)
         round_num = (num_drafted // num_teams) + 1
         pick_in_round = num_drafted % num_teams
         if (round_num % 2) != 0:
@@ -365,18 +370,6 @@ with tab2:
             on_the_clock = valid_teams[num_teams - 1 - pick_in_round]
             
         st.markdown(f"### 🟢 ON THE CLOCK: **{on_the_clock}** (Round {round_num}, Pick {pick_in_round + 1})")
-        
-        # Live Salary Cap Dashboard
-        cap_data = []
-        for t in valid_teams:
-            t_df = master_df[master_df['Draft Status'] == t]
-            spent = t_df['AI Rating'].sum()
-            rem = team_budget - spent
-            cap_data.append({"Team": t, "Roster": f"{len(t_df)} / {squad_size}", "Budget": team_budget, "Spent": spent, "Remaining": rem})
-        cap_df = pd.DataFrame(cap_data)
-        
-        st.markdown("#### 💰 Franchise Point Budgets")
-        st.dataframe(cap_df.style.format({"Budget": "{:.1f}", "Spent": "{:.1f}", "Remaining": "{:.1f}"}), hide_index=True, use_container_width=True)
         
         avail_df = master_df[master_df['Draft Status'] == "Available"].sort_values('AI Rating', ascending=False)
         
@@ -400,8 +393,11 @@ with tab2:
                 if st.button(f"🎯 DRAFT TO {selected_team.upper()}", type="primary", use_container_width=True):
                     if draft_pass == ADMIN_PASSWORD:
                         p_rating = avail_df[avail_df['Player'] == selected_player].iloc[0]['AI Rating']
-                        t_rem = cap_df[cap_df['Team'] == selected_team].iloc[0]['Remaining']
-                        t_count = len(master_df[master_df['Draft Status'] == selected_team])
+                        
+                        t_df_current = master_df[master_df['Draft Status'] == selected_team]
+                        t_spent = t_df_current['AI Rating'].sum()
+                        t_rem = team_budget - t_spent
+                        t_count = len(t_df_current)
                         
                         if t_count >= squad_size:
                             st.error(f"❌ {selected_team} already has the maximum {squad_size} players.")
@@ -421,25 +417,55 @@ with tab2:
                         st.warning("Enter password to draft.")
 
         st.markdown("---")
-        st.markdown("#### 📋 Live Team Rosters")
+        st.markdown("#### 📋 Official Draft Board & Roster Grid")
+        st.write("Live, round-by-round team compositions and salary cap overview.")
+
+        # --- GENERATING THE EXCEL-STYLE ROSTER GRID ---
+        grid_index = [str(i+1) for i in range(squad_size)]
+        grid_index.append("") # Spacer
+        grid_index.extend(["Total Points Burnt", "Total Players Added", "Total Points Allocated", "Remaining Points", "Players yet to take"])
         
-        team_cols = st.columns(num_teams)
-        for idx, t in enumerate(valid_teams):
-            with team_cols[idx]:
-                st.markdown(f"**{t}**")
-                team_roster = drafted_df[drafted_df['Draft Status'] == t].copy()
-                if team_roster.empty:
-                    st.write("*No picks yet*")
-                else:
-                    # Sort Captains -> Vice Captains -> Standard Players (by Rating)
-                    team_roster['L_Order'] = team_roster['Leadership'].map({"Captain": 0, "Vice Captain": 1, "None": 2})
-                    team_roster = team_roster.sort_values(['L_Order', 'AI Rating'], ascending=[True, False])
-                    
-                    for _, row in team_roster.iterrows():
-                        tag = ""
-                        if row['Leadership'] == 'Captain': tag = " **(C)**"
-                        elif row['Leadership'] == 'Vice Captain': tag = " **(VC)**"
-                        st.caption(f"• {row['Player']}{tag} ({row['AI Rating']})")
+        combined_data = {}
+        for t in valid_teams:
+            t_df = drafted_df[drafted_df['Draft Status'] == t].copy()
+            t_df['L_Order'] = t_df['Leadership'].map({"Captain": 0, "Vice Captain": 1, "None": 2})
+            t_df = t_df.sort_values(['L_Order', 'AI Rating'], ascending=[True, False])
+            
+            names, ratings = [], []
+            
+            # Fill drafted players
+            for _, row in t_df.iterrows():
+                tag = " (C)" if row['Leadership'] == 'Captain' else (" (VC)" if row['Leadership'] == 'Vice Captain' else "")
+                names.append(f"{row['Player']}{tag}")
+                ratings.append(f"{row['AI Rating']:.1f}")
+                
+            # Fill empty slots for remaining rounds
+            while len(names) < squad_size:
+                names.append("")
+                ratings.append("")
+                
+            # Spacer row
+            names.append("")
+            ratings.append("")
+            
+            # Summary Calculation
+            spent = t_df['AI Rating'].sum() if not t_df.empty else 0.0
+            rem = team_budget - spent
+            players_added = len(t_df)
+            players_needed = squad_size - players_added
+            
+            # Append Summary Data
+            names.extend(["", "", "", "", ""])
+            ratings.extend([f"{spent:.1f}", str(players_added), f"{team_budget:.1f}", f"{rem:.1f}", str(players_needed)])
+            
+            combined_data[(t, "Name")] = names
+            combined_data[(t, "Ratings")] = ratings
+
+        # Construct MultiIndex DataFrame
+        roster_grid = pd.DataFrame(combined_data, index=grid_index)
+        
+        # Display DataFrame
+        st.dataframe(roster_grid, use_container_width=True)
 
 # --- TAB 3: TEAM ANALYTICS ---
 with tab3:
@@ -652,7 +678,7 @@ with tab7:
                 if st.button("💾 Save Draft Rosters & Roles"):
                     new_draft = dict(zip(edited_draft["Player"], edited_draft["Draft Status"]))
                     new_leaders = dict(zip(edited_draft["Player"], edited_draft["Leadership"]))
-                    new_leaders = {k: v for k, v in new_leaders.items() if v != "None"} # Keep JSON clean
+                    new_leaders = {k: v for k, v in new_leaders.items() if v != "None"}
                     save_json(DRAFT_FILE, new_draft)
                     save_json(LEADERSHIP_FILE, new_leaders)
                     st.success("Draft and Leadership updated!")
@@ -679,12 +705,13 @@ with tab7:
 
         st.markdown("---")
         st.markdown("### 4. 🎛️ Draft & Algorithm Settings")
-        st.write("Modify the mathematical importance of each metric, or configure the Salary Cap. The AI ratings will recalculate instantly.")
+        st.write("Modify the mathematical importance of each metric, or configure the Salary Cap.")
         
         st.markdown("##### 🎯 Salary Cap Rules")
+        st.write("*(Changes made here save instantly and reflect in the Draft Room!)*")
         sc1, sc2, sc3 = st.columns(3)
-        w_squad_size = sc1.number_input("Max Players Per Team", value=int(algo_weights.get("squad_size", 11)), step=1)
-        w_team_budget = sc2.number_input("Team Point Budget", value=float(algo_weights.get("team_budget", 240.0)), step=5.0)
+        w_squad_size = sc1.number_input("Max Players Per Team", value=int(algo_weights.get("squad_size", 11)), step=1, key="cap_squad", on_change=update_cap_settings)
+        w_team_budget = sc2.number_input("Team Point Budget", value=float(algo_weights.get("team_budget", 240.0)), step=5.0, key="cap_budget", on_change=update_cap_settings)
         
         if not master_df.empty:
             valid_teams_ct = len([t for t in TEAMS if t != "Available"])
