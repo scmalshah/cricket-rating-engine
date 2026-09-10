@@ -76,15 +76,6 @@ def update_cap_settings():
         cw["team_budget"] = st.session_state.cap_budget
         save_json(WEIGHTS_FILE, cw)
 
-def extract_name(val):
-    v_str = str(val).strip()
-    if not v_str or pd.isna(val) or v_str == "None" or v_str == "--- CLEAR PICK ---": 
-        return ""
-    v_str = v_str.replace("🔒 ", "").replace("🔒", "")
-    if " (" in v_str and v_str.endswith(")"):
-        return v_str.rsplit(" (", 1)[0].strip()
-    return v_str.strip()
-
 # --- LOAD STATES ---
 saved_mapping = load_json(MAPPING_FILE, {})
 mapping_changed = False
@@ -112,8 +103,8 @@ st.title("🏏 BPL Cricket")
 st.markdown("Advanced AI Rating, Live Roster Management, and Committee Ratings.")
 
 # --- DATA PROCESSING ENGINE ---
-@st.cache_data(show_spinner="Syncing Live Roster from Google Forms...", ttl=60)
-def get_live_roster(url, col_name, mapping):
+@st.cache_data(show_spinner="Syncing Raw Live Roster from Google Forms...", ttl=60)
+def get_raw_live_roster(url, col_name):
     if not url or not col_name: return []
     try:
         sheet_id_match = re.search(r'/spreadsheets/d/([a-zA-Z0-9-_]+)', url)
@@ -130,8 +121,7 @@ def get_live_roster(url, col_name, mapping):
         match_col = next((c for c in df.columns if c.strip().lower() == col_name.strip().lower()), None)
         if match_col:
             names = df[match_col].dropna().astype(str).apply(clean_prefix)
-            mapped_names = names.map(mapping).fillna(names).unique().tolist()
-            return sorted([n for n in mapped_names if n.strip()])
+            return sorted([n.strip() for n in names if n.strip()])
         return []
     except Exception:
         return []
@@ -312,13 +302,20 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w):
     return valid
 
 file_time = os.path.getmtime(DATA_FILE) if os.path.exists(DATA_FILE) else 0
+
+# --- FETCH RAW NAMES FROM BOTH SOURCES ---
 raw_bat_cache, raw_bowl_cache, raw_field_cache, all_raw_names = get_raw_excel_data(file_time)
+raw_live_names = get_raw_live_roster(app_config.get("gsheet_url"), app_config.get("gsheet_col"))
+
+# Calculate Excel Ratings using Mappings
 excel_master_df = calculate_ratings(raw_bat_cache, raw_bowl_cache, raw_field_cache, saved_mapping, algo_weights)
 
 # --- GOOGLE SHEET LIVE INTEGRATION ---
-live_roster_names = get_live_roster(app_config.get("gsheet_url"), app_config.get("gsheet_col"), saved_mapping)
-if live_roster_names:
+if raw_live_names:
+    # Map the raw form names
+    live_roster_names = sorted(list(set([saved_mapping.get(n, n) for n in raw_live_names])))
     roster_df = pd.DataFrame({"Player": live_roster_names})
+    
     if not excel_master_df.empty:
         master_df = pd.merge(roster_df, excel_master_df, on="Player", how="left")
     else:
@@ -394,6 +391,7 @@ with tab1:
 
         disp_df['Player'] = disp_df.apply(lambda r: f"{r['Player']} (C)" if r['Leadership'] == 'Captain' else (f"{r['Player']} (VC)" if r['Leadership'] == 'Vice Captain' else r['Player']), axis=1)
 
+        # STRICT COLUMN ENFORCEMENT
         col_order = [
             'Player', 'Role', 'Tier', 'Pool Status',
             'Runs_bat', 'Bat Avg', 'SR_bat', 'Boundary_Pct',
@@ -883,7 +881,7 @@ with tab7:
             app_config["gsheet_col"] = new_gsheet_col
             save_json(CONFIG_FILE, app_config)
             st.success("Google Sheet configuration saved! Roster has been updated.")
-            get_live_roster.clear()
+            get_raw_live_roster.clear()
             st.rerun()
 
         st.markdown("---")
@@ -1004,9 +1002,11 @@ with tab7:
 
         st.markdown("---")
         st.markdown("### 6. 🛠️ Player Name Aliases & Merge Tool")
-        st.write("Edit the **'Merged Name'** column to merge aliases dynamically.")
-        if all_raw_names:
-            mapping_records = [{"Original Name": n, "Merged Name": saved_mapping.get(n, n)} for n in all_raw_names]
+        st.write("Edit the **'Merged Name'** column to fuse mismatched names from your Google Form and Excel sheet.")
+        
+        all_possible_names = sorted(list(set(all_raw_names + raw_live_names)))
+        if all_possible_names:
+            mapping_records = [{"Original Name": n, "Merged Name": saved_mapping.get(n, n)} for n in all_possible_names]
             mapping_df = pd.DataFrame(mapping_records)
             edited_mapping = st.data_editor(mapping_df, use_container_width=True, hide_index=True)
             
@@ -1017,7 +1017,7 @@ with tab7:
                 st.success("✅ Mappings saved permanently! The engine will now recalculate.")
                 st.rerun()
         else:
-            st.info("Upload an Excel file to start mapping names.")
+            st.info("Upload an Excel file or connect a Google Sheet to start mapping names.")
 
         st.markdown("---")
         st.markdown("### 7. 💾 Permanent Cloud Backup & Restore")
