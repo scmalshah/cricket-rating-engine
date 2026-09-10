@@ -19,6 +19,7 @@ WEIGHTS_FILE = "algo_weights.json"
 LEADERSHIP_FILE = "leadership.json"
 POOL_FILE = "pool_status.json"
 OVERRIDES_FILE = "scout_overrides.json"
+CONFIG_FILE = "app_config.json"
 
 ADMIN_PASSWORD = "bpladmin" 
 
@@ -93,6 +94,7 @@ pool_state = load_json(POOL_FILE, {})
 human_ratings = load_json(RATINGS_FILE, {}) 
 scout_overrides = load_json(OVERRIDES_FILE, {})
 auth_users = load_json(USERS_FILE, ["Admin", "Captain 1", "Captain 2"])
+app_config = load_json(CONFIG_FILE, {"gsheet_url": "", "gsheet_col": "Player Name"})
 TEAMS = ["Available", "Team 1", "Team 2", "Team 3", "Team 4", "Team 5"]
 
 algo_weights = load_json(WEIGHTS_FILE, DEFAULT_WEIGHTS)
@@ -104,6 +106,29 @@ st.title("🏏 BPL Cricket")
 st.markdown("Advanced AI Rating, Live Roster Management, and Committee Ratings.")
 
 # --- DATA PROCESSING ENGINE ---
+@st.cache_data(show_spinner="Syncing Live Roster from Google Forms...", ttl=60)
+def get_live_roster(url, col_name, mapping):
+    if not url or not col_name: return []
+    try:
+        # Automatically transform standard Google Sheet link into a CSV export link
+        if "/edit" in url:
+            csv_url = re.sub(r'/edit.*', '/export?format=csv', url)
+        else:
+            csv_url = url
+            
+        df = pd.read_csv(csv_url)
+        # Find exact column or loosely match to prevent capitalization crashes
+        match_col = next((c for c in df.columns if c.strip().lower() == col_name.strip().lower()), None)
+        
+        if match_col:
+            names = df[match_col].dropna().astype(str).apply(clean_prefix)
+            mapped_names = names.map(mapping).fillna(names).unique().tolist()
+            return sorted(mapped_names)
+        else:
+            return []
+    except Exception as e:
+        return []
+
 @st.cache_data(show_spinner="Reading Excel File (Only happens once)...")
 def get_raw_excel_data(file_mod_time):
     if not os.path.exists(DATA_FILE): return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), []
@@ -281,7 +306,33 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w):
 
 file_time = os.path.getmtime(DATA_FILE) if os.path.exists(DATA_FILE) else 0
 raw_bat_cache, raw_bowl_cache, raw_field_cache, all_raw_names = get_raw_excel_data(file_time)
-master_df = calculate_ratings(raw_bat_cache, raw_bowl_cache, raw_field_cache, saved_mapping, algo_weights)
+excel_master_df = calculate_ratings(raw_bat_cache, raw_bowl_cache, raw_field_cache, saved_mapping, algo_weights)
+
+# --- GOOGLE SHEET LIVE INTEGRATION ---
+live_roster_names = get_live_roster(app_config.get("gsheet_url"), app_config.get("gsheet_col"), saved_mapping)
+if live_roster_names:
+    roster_df = pd.DataFrame({"Player": live_roster_names})
+    if not excel_master_df.empty:
+        master_df = pd.merge(roster_df, excel_master_df, on="Player", how="left")
+    else:
+        master_df = roster_df
+        
+    # Grant default baseline AI ratings to completely new rookies pulled from Google Forms
+    master_df['AI Rating'] = master_df['AI Rating'].fillna(20.0)
+    master_df['Bat_Rating'] = master_df['Bat_Rating'].fillna(20.0)
+    master_df['Bowl_Rating'] = master_df['Bowl_Rating'].fillna(20.0)
+    master_df['Field_Rating'] = master_df['Field_Rating'].fillna(20.0)
+    master_df['Role'] = master_df['Role'].fillna('Batter')
+    master_df['Tier'] = pd.cut(master_df['AI Rating'], bins=[0, 16.9, 22.9, 26.9, 31], labels=["Bronze", "Silver", "Gold", "Platinum"])
+    
+    # Fill missing raw stats with 0 for new players so table doesn't crash
+    stat_cols = ['Runs_bat', 'Bat Avg', 'SR_bat', 'Boundary_Pct', 'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 'Extras_Rate', 'Total_Fielding']
+    for c in stat_cols:
+        if c not in master_df.columns: master_df[c] = 0
+        master_df[c] = master_df[c].fillna(0)
+else:
+    # Fallback to pure Excel if no Google Sheet is connected
+    master_df = excel_master_df
 
 if not master_df.empty:
     master_df['Draft Status'] = master_df['Player'].apply(lambda x: draft_state.get(x, "Available"))
@@ -310,7 +361,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["🏆 Live Dashboard", "🎯
 # --- TAB 1: LIVE DASHBOARD ---
 with tab1:
     if master_df.empty:
-        st.info("👋 Welcome! Please navigate to the '⚙️ Admin & Data' tab and upload your Excel stats file.")
+        st.info("👋 Welcome! Please navigate to the '⚙️ Admin & Data' tab and connect your Excel Data or Google Form Roster.")
     else:
         st.subheader("Live Interactive Dashboard")
         
@@ -372,7 +423,6 @@ with tab1:
         styled_df = disp_df.style.background_gradient(subset=['AI Rating', 'Final Scout Rating'], cmap='RdYlGn', vmin=10, vmax=30)\
             .format(fmt_dict, na_rep="-")
             
-        # FIX: Converted disp_df.columns to a list using .tolist() to prevent Streamlit ValueError
         st.dataframe(styled_df, use_container_width=True, column_order=disp_df.columns.tolist())
 
 # --- TAB 2: TEAM SELECTION ---
@@ -818,9 +868,27 @@ with tab7:
         st.success("Admin Access Granted")
         st.markdown("---")
         
+        st.markdown("### 🔗 1. Live Registration Roster (Google Forms)")
+        st.write("Link your Google Form results to automatically build the Draft Pool. The Google Sheet must be set to **'Anyone with the link can view'**. Players on this list without historical Excel stats will automatically receive a 20.0 baseline AI rating.")
+        
+        g1, g2 = st.columns([3, 1])
+        new_gsheet_url = g1.text_input("Google Sheet URL", value=app_config.get("gsheet_url", ""))
+        new_gsheet_col = g2.text_input("Column Header for Names", value=app_config.get("gsheet_col", "Player Name"))
+        
+        if st.button("🔗 Sync Google Roster"):
+            app_config["gsheet_url"] = new_gsheet_url
+            app_config["gsheet_col"] = new_gsheet_col
+            save_json(CONFIG_FILE, app_config)
+            st.success("Google Sheet configuration saved! Roster has been updated.")
+            # Clear the cache for the live roster explicitly
+            get_live_roster.clear()
+            st.rerun()
+
+        st.markdown("---")
+        
         ac1, ac2 = st.columns(2)
         with ac1:
-            st.markdown("**1. Setup Rosters, Leadership & Player Pool**")
+            st.markdown("**2. Setup Rosters, Leadership & Player Pool**")
             st.caption("Assign Captains and toggle whether a player is eligible for the draft (Team Player) or held in reserve (Pool Player).")
             if not master_df.empty:
                 draft_df = pd.DataFrame({
@@ -854,7 +922,7 @@ with tab7:
                 st.info("Upload data first.")
 
         with ac2:
-            st.markdown("**2. Authorized Evaluators**")
+            st.markdown("**3. Authorized Evaluators**")
             users_text = st.text_area("List names (comma separated)", ", ".join(auth_users))
             if st.button("Update Evaluators"):
                 new_users = [u.strip() for u in users_text.split(",")]
@@ -863,15 +931,15 @@ with tab7:
                 st.rerun()
             
             st.markdown("---")
-            st.markdown("**3. Data File Upload**")
-            uploaded_file = st.file_uploader("Upload Raw Stats (.xlsx)", type=["xlsx"])
+            st.markdown("**4. Data File Upload**")
+            uploaded_file = st.file_uploader("Upload Raw Historical Stats (.xlsx)", type=["xlsx"])
             if uploaded_file:
                 with open(DATA_FILE, "wb") as f: f.write(uploaded_file.getbuffer())
                 st.success("Uploaded!")
                 st.rerun()
 
         st.markdown("---")
-        st.markdown("### 4. 🎛️ Draft & Algorithm Settings")
+        st.markdown("### 5. 🎛️ Draft & Algorithm Settings")
         st.write("Modify the mathematical importance of each metric, or configure the Salary Cap.")
         
         st.markdown("##### 🎯 Salary Cap Rules")
@@ -933,7 +1001,7 @@ with tab7:
             st.rerun()
 
         st.markdown("---")
-        st.markdown("### 5. 🛠️ Player Name Aliases & Merge Tool")
+        st.markdown("### 6. 🛠️ Player Name Aliases & Merge Tool")
         st.write("Edit the **'Merged Name'** column to merge aliases dynamically.")
         if all_raw_names:
             mapping_records = [{"Original Name": n, "Merged Name": saved_mapping.get(n, n)} for n in all_raw_names]
@@ -950,7 +1018,7 @@ with tab7:
             st.info("Upload an Excel file to start mapping names.")
 
         st.markdown("---")
-        st.markdown("### 6. 💾 Permanent Cloud Backup & Restore")
+        st.markdown("### 7. 💾 Permanent Cloud Backup & Restore")
         st.write("Because free servers reset when code changes, download your server state to save your mappings and rosters permanently.")
         
         bc1, bc2 = st.columns(2)
@@ -962,7 +1030,8 @@ with tab7:
                 "weights": load_json(WEIGHTS_FILE, DEFAULT_WEIGHTS),
                 "leadership": load_json(LEADERSHIP_FILE, {}),
                 "pool": load_json(POOL_FILE, {}),
-                "overrides": load_json(OVERRIDES_FILE, {})
+                "overrides": load_json(OVERRIDES_FILE, {}),
+                "config": load_json(CONFIG_FILE, {"gsheet_url": "", "gsheet_col": "Player Name"})
             }
             backup_json = json.dumps(backup_data, indent=2).encode('utf-8')
             st.download_button(
@@ -984,5 +1053,6 @@ with tab7:
                 if "leadership" in restore_data: save_json(LEADERSHIP_FILE, restore_data.get("leadership", {}))
                 if "pool" in restore_data: save_json(POOL_FILE, restore_data.get("pool", {}))
                 if "overrides" in restore_data: save_json(OVERRIDES_FILE, restore_data.get("overrides", {}))
+                if "config" in restore_data: save_json(CONFIG_FILE, restore_data.get("config", {}))
                 st.success("✅ Server state fully restored!")
                 st.rerun()
