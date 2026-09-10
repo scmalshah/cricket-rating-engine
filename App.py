@@ -72,7 +72,7 @@ def extract_name(val):
     v_str = str(val).strip()
     if not v_str or pd.isna(val) or v_str == "None" or v_str == "--- CLEAR PICK ---": 
         return ""
-    v_str = v_str.replace("🔒 ", "").replace("🔒", "")
+    # Safely extract just the name if a rating is attached in brackets
     if " (" in v_str and v_str.endswith(")"):
         return v_str.rsplit(" (", 1)[0].strip()
     return v_str.strip()
@@ -414,7 +414,7 @@ with tab2:
 
         # --- EXCEL-STYLE INTERACTIVE DRAFT GRID ---
         st.markdown("#### 📋 Official Draft Board Grid")
-        st.write("Click an empty cell to pick a player. If you need to remove someone or made a mistake, select **`--- CLEAR PICK ---`**.")
+        st.write("Click an empty cell to pick a player. If you need to remove someone, select **`--- CLEAR PICK ---`**.")
         
         # Display Errors safely and clear immediately
         if "draft_error" in st.session_state:
@@ -426,7 +426,7 @@ with tab2:
             grid_df[t] = ""
             grid_df[f"{t} Rtg"] = np.nan
 
-        # Pre-fill grid with 🔒 + Name + Rating 
+        # Pre-fill grid perfectly (NO LOCK EMOJI to prevent Streamlit blanking bugs)
         for t in valid_teams:
             t_players = [p for p, team in draft_state.items() if team == t]
             for i, p_name in enumerate(t_players):
@@ -434,8 +434,8 @@ with tab2:
                     p_match = master_df[master_df['Player'] == p_name]
                     if not p_match.empty:
                         p_rtg = float(p_match.iloc[0]['AI Rating'])
-                        # The exact format injected into the backend grid DataFrame
-                        grid_df.iat[i, grid_df.columns.get_loc(t)] = f"🔒 {p_name} ({p_rtg:.1f})"
+                        # Perfectly matches the dropdown option format!
+                        grid_df.iat[i, grid_df.columns.get_loc(t)] = f"{p_name} ({p_rtg:.1f})"
                         grid_df.iat[i, grid_df.columns.get_loc(f"{t} Rtg")] = p_rtg
 
         # Build Clean Dropdown Options
@@ -450,10 +450,9 @@ with tab2:
             for p in t_drafted:
                 p_match = master_df[master_df['Player'] == p]
                 if not p_match.empty:
-                    # These locked options match the grid values EXACTLY so Streamlit renders them properly
-                    t_drafted_opts.append(f"🔒 {p} ({p_match.iloc[0]['AI Rating']:.1f})")
+                    # These locked options match the grid values EXACTLY so Streamlit never blanks the cell
+                    t_drafted_opts.append(f"{p} ({p_match.iloc[0]['AI Rating']:.1f})")
             
-            # Add CLEAR PICK tool to perfectly clear a cell without fighting Streamlit's backspace logic
             opts = ["--- CLEAR PICK ---"] + t_drafted_opts + avail_opts
             col_config[t] = st.column_config.SelectboxColumn(f"{t} Name", options=opts, required=False)
             col_config[f"{t} Rtg"] = st.column_config.Column("Ratings", disabled=True)
