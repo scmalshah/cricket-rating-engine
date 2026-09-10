@@ -17,6 +17,7 @@ RATINGS_FILE = "human_ratings.json"
 USERS_FILE = "authorized_users.json"
 WEIGHTS_FILE = "algo_weights.json"
 LEADERSHIP_FILE = "leadership.json"
+POOL_FILE = "pool_status.json"
 
 ADMIN_PASSWORD = "bpladmin" 
 
@@ -78,6 +79,7 @@ if mapping_changed: save_json(MAPPING_FILE, saved_mapping)
 
 draft_state = load_json(DRAFT_FILE, {}) 
 leadership_state = load_json(LEADERSHIP_FILE, {})
+pool_state = load_json(POOL_FILE, {})
 human_ratings = load_json(RATINGS_FILE, {}) 
 auth_users = load_json(USERS_FILE, ["Admin", "Captain 1", "Captain 2"])
 TEAMS = ["Available", "Team 1", "Team 2", "Team 3", "Team 4", "Team 5"]
@@ -284,6 +286,7 @@ if not master_df.empty:
     master_df['Avg Scout Score'] = master_df['Player'].apply(get_avg_scout)
     master_df['Draft Status'] = master_df['Player'].apply(lambda x: draft_state.get(x, "Available"))
     master_df['Leadership'] = master_df['Player'].apply(lambda x: leadership_state.get(x, "None"))
+    master_df['Pool Status'] = master_df['Player'].apply(lambda x: pool_state.get(x, "Team Player"))
 
 # --- UI TABS ---
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["🏆 Live Draft Board", "🎯 Snake Draft Room", "📊 Team Analytics", "🕸️ Player Profiles", "📝 Committee Scouting", "🧠 Methodology", "⚙️ Admin & Data"])
@@ -313,7 +316,7 @@ with tab1:
         disp_df['Player'] = disp_df.apply(lambda r: f"{r['Player']} (C)" if r['Leadership'] == 'Captain' else (f"{r['Player']} (VC)" if r['Leadership'] == 'Vice Captain' else r['Player']), axis=1)
 
         col_order = [
-            'Player', 'Role', 'Tier', 
+            'Player', 'Role', 'Tier', 'Pool Status',
             'Runs_bat', 'Bat Avg', 'SR_bat', 'Boundary_Pct',
             'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 'Extras_Rate',
             'Total_Fielding', 
@@ -323,7 +326,7 @@ with tab1:
         disp_df = disp_df[col_order].sort_values('AI Rating', ascending=False)
         
         disp_df.columns = [
-            'Player', 'Role', 'Tier', 
+            'Player', 'Role', 'Tier', 'Pool Status',
             'Runs', 'Bat Avg', 'Bat SR', 'Bound %',
             'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 'Extras/Ov',
             'Fielding', 
@@ -369,103 +372,108 @@ with tab2:
         else:
             on_the_clock = valid_teams[num_teams - 1 - pick_in_round]
             
+        st.markdown("---")
         st.markdown(f"### 🟢 ON THE CLOCK: **{on_the_clock}** (Round {round_num}, Pick {pick_in_round + 1})")
         
-        avail_df = master_df[master_df['Draft Status'] == "Available"].sort_values('AI Rating', ascending=False)
+        # --- EXCEL-STYLE INTERACTIVE DRAFT GRID ---
+        st.markdown("#### 📋 Official Draft Board Grid")
+        st.write("Select players directly from the dropdowns below. Once a player is picked, they will vanish from the available list.")
         
-        if avail_df.empty or num_drafted >= (num_teams * squad_size):
-            st.success("🎉 The Draft is Complete! All rosters are full.")
-        else:
-            c1, c2, c3 = st.columns([3, 2, 2])
-            with c1:
-                player_opts = avail_df['Player'] + " (Cost: " + avail_df['AI Rating'].astype(str) + " | " + avail_df['Role'] + ")"
-                opt_to_player = dict(zip(player_opts, avail_df['Player']))
-                selected_opt = st.selectbox("Select Player to Draft:", player_opts.tolist())
-                selected_player = opt_to_player[selected_opt]
-                
-            with c2:
-                snake_index = valid_teams.index(on_the_clock)
-                selected_team = st.selectbox("Drafting Team:", valid_teams, index=snake_index)
-                
-            with c3:
-                st.write("")
-                st.write("")
-                if st.button(f"🎯 DRAFT TO {selected_team.upper()}", type="primary", use_container_width=True):
-                    if draft_pass == ADMIN_PASSWORD:
-                        p_rating = avail_df[avail_df['Player'] == selected_player].iloc[0]['AI Rating']
-                        
-                        t_df_current = master_df[master_df['Draft Status'] == selected_team]
-                        t_spent = t_df_current['AI Rating'].sum()
-                        t_rem = team_budget - t_spent
-                        t_count = len(t_df_current)
-                        
-                        if t_count >= squad_size:
-                            st.error(f"❌ {selected_team} already has the maximum {squad_size} players.")
-                        elif p_rating > t_rem:
-                            st.error(f"❌ SALARY CAP EXCEEDED: {selected_team} only has {t_rem:.1f} points left, but {selected_player} costs {p_rating:.1f}.")
-                        elif (t_rem - p_rating) < (10.0 * (squad_size - t_count - 1)):
-                            min_req = 10.0 * (squad_size - t_count - 1)
-                            st.error(f"❌ INVALID PICK: Drafting {selected_player} leaves insufficient funds to fill the roster. (Save {min_req:.1f} points for remaining empty spots).")
-                        else:
-                            draft_state[selected_player] = selected_team
-                            save_json(DRAFT_FILE, draft_state)
-                            st.success(f"✅ {selected_player} successfully drafted to {selected_team} for {p_rating:.1f} points!")
-                            st.rerun()
-                    elif draft_pass != "":
-                        st.error("Incorrect password.")
-                    else:
-                        st.warning("Enter password to draft.")
+        grid_df = pd.DataFrame(index=[f"Round {i+1}" for i in range(squad_size)])
+        for t in valid_teams:
+            grid_df[t] = ""
+            grid_df[f"{t} Rtg"] = ""
 
-        st.markdown("---")
-        st.markdown("#### 📋 Official Draft Board & Roster Grid")
-        st.write("Live, round-by-round team compositions and salary cap overview.")
-
-        # --- GENERATING THE EXCEL-STYLE ROSTER GRID ---
-        grid_index = [str(i+1) for i in range(squad_size)]
-        grid_index.append("") # Spacer
-        grid_index.extend(["Total Points Burnt", "Total Players Added", "Total Points Allocated", "Remaining Points", "Players yet to take"])
-        
-        combined_data = {}
+        # Pre-fill grid with drafted players
         for t in valid_teams:
             t_df = drafted_df[drafted_df['Draft Status'] == t].copy()
             t_df['L_Order'] = t_df['Leadership'].map({"Captain": 0, "Vice Captain": 1, "None": 2})
             t_df = t_df.sort_values(['L_Order', 'AI Rating'], ascending=[True, False])
             
-            names, ratings = [], []
+            for i, (_, row) in enumerate(t_df.iterrows()):
+                if i < squad_size:
+                    grid_df.iat[i, grid_df.columns.get_loc(t)] = row['Player']
+                    grid_df.iat[i, grid_df.columns.get_loc(f"{t} Rtg")] = f"{row['AI Rating']:.1f}"
+
+        # Config dropdown options (Only "Team Players" allowed)
+        avail_team_players = master_df[(master_df['Draft Status'] == "Available") & (master_df['Pool Status'] == "Team Player")].sort_values('AI Rating', ascending=False)
+        avail_names = avail_team_players['Player'].tolist()
+
+        col_config = {}
+        for t in valid_teams:
+            t_drafted = drafted_df[drafted_df['Draft Status'] == t]['Player'].tolist()
+            opts = [""] + t_drafted + avail_names
+            col_config[t] = st.column_config.SelectboxColumn(f"{t} Name", options=opts)
+            col_config[f"{t} Rtg"] = st.column_config.Column(f"Ratings", disabled=True)
+
+        edited_grid = st.data_editor(grid_df, column_config=col_config, use_container_width=True, key="live_grid")
+
+        # Catching edits from the Grid
+        if not grid_df.equals(edited_grid):
+            if draft_pass != ADMIN_PASSWORD:
+                st.error("❌ Enter Admin Password above to make draft picks.")
+                st.stop()
+
+            new_draft_state = draft_state.copy()
+            grid_changed = False
             
-            # Fill drafted players
-            for _, row in t_df.iterrows():
-                tag = " (C)" if row['Leadership'] == 'Captain' else (" (VC)" if row['Leadership'] == 'Vice Captain' else "")
-                names.append(f"{row['Player']}{tag}")
-                ratings.append(f"{row['AI Rating']:.1f}")
+            for t in valid_teams:
+                # Build new roster list based on the user's edit
+                t_players = []
+                for i in range(squad_size):
+                    val = edited_grid.iat[i, edited_grid.columns.get_loc(t)]
+                    if val: t_players.append(val)
                 
-            # Fill empty slots for remaining rounds
-            while len(names) < squad_size:
-                names.append("")
-                ratings.append("")
+                # Check Salary Cap before allowing the edit to save
+                t_spent = sum([master_df[master_df['Player'] == p]['AI Rating'].iloc[0] for p in t_players if p in master_df['Player'].values])
+                t_rem = team_budget - t_spent
+                t_count = len(t_players)
                 
-            # Spacer row
-            names.append("")
-            ratings.append("")
+                if t_spent > team_budget:
+                    st.error(f"❌ SALARY CAP EXCEEDED: {t} cannot afford this roster! Edit reverted.")
+                    st.stop()
+                if t_rem < (10.0 * (squad_size - t_count)):
+                    min_req = 10.0 * (squad_size - t_count)
+                    st.error(f"❌ INVALID ROSTER: {t} must save at least {min_req:.1f} points for remaining {squad_size - t_count} slots. Edit reverted.")
+                    st.stop()
             
-            # Summary Calculation
+            # If all checks pass, commit the changes to the engine
+            for t in valid_teams:
+                for i in range(squad_size):
+                    old_val = grid_df.iat[i, grid_df.columns.get_loc(t)]
+                    new_val = edited_grid.iat[i, edited_grid.columns.get_loc(t)]
+                    if old_val != new_val:
+                        grid_changed = True
+                        if old_val and old_val in new_draft_state:
+                            del new_draft_state[old_val]
+                        if new_val:
+                            new_draft_state[new_val] = t
+                            
+            if grid_changed:
+                save_json(DRAFT_FILE, new_draft_state)
+                st.rerun()
+
+        # --- SUMMARY STATISTICS TABLE ---
+        st.markdown("#### 💰 Cumulative Roster & Cap Summary")
+        sum_df = pd.DataFrame(index=["Total Points Burnt", "Total Players Added", "Total Points Allocated", "Remaining Points", "Players yet to take"])
+        
+        for t in valid_teams:
+            t_df = drafted_df[drafted_df['Draft Status'] == t]
             spent = t_df['AI Rating'].sum() if not t_df.empty else 0.0
             rem = team_budget - spent
             players_added = len(t_df)
             players_needed = squad_size - players_added
             
-            # Append Summary Data
-            names.extend(["", "", "", "", ""])
-            ratings.extend([f"{spent:.1f}", str(players_added), f"{team_budget:.1f}", f"{rem:.1f}", str(players_needed)])
+            sum_df[t] = ["", "", "", "", ""]
+            sum_df[f"{t} Rtg"] = [
+                f"{spent:.1f}",
+                str(players_added),
+                f"{team_budget:.1f}",
+                f"{rem:.1f}",
+                str(players_needed)
+            ]
             
-            combined_data[(t, "Name")] = names
-            combined_data[(t, "Ratings")] = ratings
-
-        # Construct MultiIndex DataFrame
-        roster_grid = pd.DataFrame(combined_data, index=grid_index)
-        
-        # Display DataFrame
-        st.dataframe(roster_grid, use_container_width=True)
+        st.dataframe(sum_df, use_container_width=True)
 
 # --- TAB 3: TEAM ANALYTICS ---
 with tab3:
@@ -506,7 +514,7 @@ with tab4:
             pc1, pc2 = st.columns([1, 2])
             with pc1:
                 st.markdown(f"### {p_data['Player']} {tag}")
-                st.markdown(f"**Role:** {p_data['Role']} | **Tier:** {p_data['Tier']}")
+                st.markdown(f"**Role:** {p_data['Role']} | **Tier:** {p_data['Tier']} | **Status:** {p_data['Pool Status']}")
                 st.markdown(f"**AI Rating:** {p_data['AI Rating']:.1f}/30.0")
                 st.markdown(f"**Drafted To:** {p_data['Draft Status']}")
                 st.markdown("---")
@@ -659,29 +667,35 @@ with tab7:
         
         ac1, ac2 = st.columns(2)
         with ac1:
-            st.markdown("**1. Live Draft & Leadership Management**")
-            st.caption("Pre-assign Captains here. Their ratings will automatically deduct from their Team's salary cap.")
+            st.markdown("**1. Setup Rosters, Leadership & Player Pool**")
+            st.caption("Assign Captains and toggle whether a player is eligible for the draft (Team Player) or held in reserve (Pool Player).")
             if not master_df.empty:
                 draft_df = pd.DataFrame({
                     "Player": master_df['Player'], 
                     "Draft Status": master_df['Draft Status'],
-                    "Leadership": master_df['Leadership']
+                    "Leadership": master_df['Leadership'],
+                    "Pool Status": master_df['Pool Status']
                 })
                 edited_draft = st.data_editor(
                     draft_df, 
                     column_config={
                         "Draft Status": st.column_config.SelectboxColumn(options=TEAMS),
-                        "Leadership": st.column_config.SelectboxColumn(options=["None", "Captain", "Vice Captain"])
+                        "Leadership": st.column_config.SelectboxColumn(options=["None", "Captain", "Vice Captain"]),
+                        "Pool Status": st.column_config.SelectboxColumn(options=["Team Player", "Pool Player"])
                     }, 
                     hide_index=True, use_container_width=True
                 )
-                if st.button("💾 Save Draft Rosters & Roles"):
+                if st.button("💾 Save Rosters, Roles & Pool"):
                     new_draft = dict(zip(edited_draft["Player"], edited_draft["Draft Status"]))
+                    new_pool = dict(zip(edited_draft["Player"], edited_draft["Pool Status"]))
+                    
                     new_leaders = dict(zip(edited_draft["Player"], edited_draft["Leadership"]))
                     new_leaders = {k: v for k, v in new_leaders.items() if v != "None"}
+                    
                     save_json(DRAFT_FILE, new_draft)
                     save_json(LEADERSHIP_FILE, new_leaders)
-                    st.success("Draft and Leadership updated!")
+                    save_json(POOL_FILE, new_pool)
+                    st.success("Draft, Leadership, and Pool updated!")
                     st.rerun()
             else:
                 st.info("Upload data first.")
@@ -715,9 +729,9 @@ with tab7:
         
         if not master_df.empty:
             valid_teams_ct = len([t for t in TEAMS if t != "Available"])
-            ideal_pool = master_df.sort_values('AI Rating', ascending=False).head(valid_teams_ct * w_squad_size)
+            ideal_pool = master_df[(master_df['Pool Status'] == "Team Player")].sort_values('AI Rating', ascending=False).head(valid_teams_ct * w_squad_size)
             suggested_cap = ideal_pool['AI Rating'].sum() / valid_teams_ct
-            sc3.info(f"**Suggested Cap:** {suggested_cap:.1f} pts\n\n*(Based on top {valid_teams_ct * w_squad_size} available players)*")
+            sc3.info(f"**Suggested Cap:** {suggested_cap:.1f} pts\n\n*(Based on top {valid_teams_ct * w_squad_size} Team Players)*")
         
         st.markdown("##### 🏏 Batting Metrics (%)")
         b1, b2, b3, b4, b5 = st.columns(5)
@@ -793,7 +807,8 @@ with tab7:
                 "draft": load_json(DRAFT_FILE, {}),
                 "ratings": load_json(RATINGS_FILE, {}),
                 "weights": load_json(WEIGHTS_FILE, DEFAULT_WEIGHTS),
-                "leadership": load_json(LEADERSHIP_FILE, {})
+                "leadership": load_json(LEADERSHIP_FILE, {}),
+                "pool": load_json(POOL_FILE, {})
             }
             backup_json = json.dumps(backup_data, indent=2).encode('utf-8')
             st.download_button(
@@ -813,6 +828,7 @@ with tab7:
                 if "ratings" in restore_data: save_json(RATINGS_FILE, restore_data.get("ratings", {}))
                 if "weights" in restore_data: save_json(WEIGHTS_FILE, restore_data.get("weights", {}))
                 if "leadership" in restore_data: save_json(LEADERSHIP_FILE, restore_data.get("leadership", {}))
+                if "pool" in restore_data: save_json(POOL_FILE, restore_data.get("pool", {}))
                 st.success("✅ Server state fully restored!")
                 st.rerun()
     elif password_attempt != "":
