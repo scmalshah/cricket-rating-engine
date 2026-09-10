@@ -108,18 +108,36 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping):
     if not rbowl.empty: rbowl['Player'] = rbowl['Player'].map(mapping).fillna(rbowl['Player'])
     if not rfield.empty: rfield['Player'] = rfield['Player'].map(mapping).fillna(rfield['Player'])
 
+    # Search for Boundary Columns dynamically
+    fours_col = next((c for c in rbat.columns if str(c).lower().strip() in ['4s', 'fours', '4', "4's"]), None)
+    sixes_col = next((c for c in rbat.columns if str(c).lower().strip() in ['6s', 'sixes', '6', "6's"]), None)
+
     # Aggregate Batting
     for col in ['Runs', 'SR', 'Inns', 'NO']:
         rbat[col] = pd.to_numeric(rbat.get(col, 0), errors='coerce').fillna(0)
+    
+    if fours_col: rbat[fours_col] = pd.to_numeric(rbat[fours_col], errors='coerce').fillna(0)
+    if sixes_col: rbat[sixes_col] = pd.to_numeric(rbat[sixes_col], errors='coerce').fillna(0)
+        
     rbat['Balls_Faced'] = np.where(rbat['SR'] > 0, (rbat['Runs'] / rbat['SR']) * 100, 0)
     rbat['Dismissals'] = (rbat['Inns'] - rbat['NO']).clip(lower=0)
-    agg_bat = rbat.groupby('Player').agg(Inns=('Inns', 'sum'), Runs_bat=('Runs', 'sum'), Balls_Faced=('Balls_Faced', 'sum'), Dismissals=('Dismissals', 'sum')).reset_index()
+    
+    bat_agg_kwargs = {
+        'Inns': ('Inns', 'sum'),
+        'Runs_bat': ('Runs', 'sum'),
+        'Balls_Faced': ('Balls_Faced', 'sum'),
+        'Dismissals': ('Dismissals', 'sum')
+    }
+    if fours_col: bat_agg_kwargs['Fours'] = (fours_col, 'sum')
+    if sixes_col: bat_agg_kwargs['Sixes'] = (sixes_col, 'sum')
+    
+    agg_bat = rbat.groupby('Player').agg(**bat_agg_kwargs).reset_index()
 
     # Find and Aggregate Extras (Wides and No Balls)
     extras = np.zeros(len(rbowl))
     if not rbowl.empty:
         for col in rbowl.columns:
-            cl = col.lower().strip()
+            cl = str(col).lower().strip()
             if cl in ['wd', 'wide', 'wides', 'nb', 'no ball', 'noballs', 'no balls']:
                 extras += pd.to_numeric(rbowl[col], errors='coerce').fillna(0).values
         rbowl['Total_Extras'] = extras
@@ -147,7 +165,13 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping):
     valid = valid[(valid['Balls_Faced'] >= 12) | (valid['Balls_Bowled'] >= 18)].copy()
     if valid.empty: return pd.DataFrame()
 
+    # Ensure Boundary Columns exist for calculation
+    if 'Fours' not in valid.columns: valid['Fours'] = 0
+    if 'Sixes' not in valid.columns: valid['Sixes'] = 0
+    
     # Standardize Stats
+    valid['Bound_Runs'] = (valid['Fours'] * 4) + (valid['Sixes'] * 6)
+    valid['Boundary_Pct'] = np.where(valid['Runs_bat'] > 0, (valid['Bound_Runs'] / valid['Runs_bat']) * 100, 0)
     valid['SR_bat'] = np.where(valid['Balls_Faced'] > 0, (valid['Runs_bat'] / valid['Balls_Faced']) * 100, 0)
     valid['Econ'] = np.where(valid['Balls_Bowled'] > 0, (valid['Runs_bowl'] / valid['Balls_Bowled']) * 6, 999)
     valid['Bat Avg'] = np.where(valid['Dismissals'] > 0, valid['Runs_bat'] / valid['Dismissals'], valid['Runs_bat'])
@@ -167,6 +191,10 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping):
     valid['Sm_SR'] = ((valid['Runs_bat'] + ((valid['Runs_bat'].sum() / (valid['Balls_Faced'].sum() or 1) * 100) / 100 * 30)) / (valid['Balls_Faced'] + 30)) * 100
     valid['Sm_BPD'] = (valid['Balls_Faced'] + (mean_bpd * 3)) / (valid['Dismissals'] + 3)
     
+    # Smoothing for Boundaries (injecting 50 runs of league-average boundary hitting)
+    league_bound_pct = valid['Bound_Runs'].sum() / (valid['Runs_bat'].sum() or 1)
+    valid['Sm_Boundary'] = ((valid['Bound_Runs'] + (league_bound_pct * 50)) / (valid['Runs_bat'] + 50)) * 100
+    
     valid['Sm_Econ'] = ((valid['Runs_bowl'] + ((valid['Runs_bowl'].sum() / (valid['Balls_Bowled'].sum() or 1) * 6) / 6 * 30)) / (valid['Balls_Bowled'] + 30)) * 6
     valid['Sm_Avg_bowl'] = (valid['Runs_bowl'] + ((valid['Runs_bowl'].sum() / (valid['Balls_Bowled'].sum() or 1) * 6) * 5)) / (valid['Wkts'] + 5)
     valid['Sm_Bowl_SR'] = (valid['Balls_Bowled'] + (mean_bowl_sr * 5)) / (valid['Wkts'] + 5)
@@ -177,6 +205,7 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping):
     z_avg = (valid['Sm_Avg'] - valid['Sm_Avg'].mean()) / (valid['Sm_Avg'].std() or 1)
     z_sr = (valid['Sm_SR'] - valid['Sm_SR'].mean()) / (valid['Sm_SR'].std() or 1)
     z_bpd = (valid['Sm_BPD'] - valid['Sm_BPD'].mean()) / (valid['Sm_BPD'].std() or 1)
+    z_bound = (valid['Sm_Boundary'] - valid['Sm_Boundary'].mean()) / (valid['Sm_Boundary'].std() or 1)
     
     z_wkts = (valid['Wkts'] - valid['Wkts'].mean()) / (valid['Wkts'].std() or 1)
     z_econ = (valid['Sm_Econ'].mean() - valid['Sm_Econ']) / (valid['Sm_Econ'].std() or 1)
@@ -186,9 +215,11 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping):
     
     valid['Fielding_Score'] = (valid['Total_Fielding'] - valid['Total_Fielding'].mean()) / (valid['Total_Fielding'].std() or 1)
 
-    # Calculate Individual Discipline Scores (Now with Extras Penalty)
-    valid['Bat_Score'] = (z_runs * 0.25) + (z_avg * 0.35) + (z_sr * 0.25) + (z_bpd * 0.15)
+    # Calculate Individual Discipline Scores
+    valid['Bat_Score'] = (z_runs * 0.20) + (z_avg * 0.30) + (z_sr * 0.25) + (z_bpd * 0.10) + (z_bound * 0.15)
     valid['Bowl_Score'] = (z_wkts * 0.30) + (z_econ * 0.25) + (z_avg_bowl * 0.20) + (z_bowl_sr * 0.15) + (z_extras * 0.10)
+    
+    valid['Boundary_Score'] = z_bound # Stored for Radar Chart
 
     # Role & Final Logic
     valid['Role'] = valid.apply(lambda r: 'All-Rounder' if r['Balls_Faced'] >= 15 and r['Balls_Bowled'] >= 18 else ('Bowler' if r['Balls_Bowled'] >= 18 else 'Batter'), axis=1)
@@ -262,10 +293,10 @@ with tab1:
         if status_f == "Available Only": disp_df = disp_df[disp_df['Draft Status'] == "Available"]
         elif status_f != "All Players": disp_df = disp_df[disp_df['Draft Status'] == status_f]
 
-        # Formatting Output Columns
+        # Formatting Output Columns including Boundary Pct
         col_order = [
             'Player', 'Role', 'Tier', 
-            'Runs_bat', 'Bat Avg', 'SR_bat', 
+            'Runs_bat', 'Bat Avg', 'SR_bat', 'Boundary_Pct',
             'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 'Extras_Rate',
             'Total_Fielding', 
             'Bat_Rating', 'Bowl_Rating', 'Field_Rating', 'Avg Scout Score', 'AI Rating', 
@@ -275,7 +306,7 @@ with tab1:
         
         disp_df.columns = [
             'Player', 'Role', 'Tier', 
-            'Runs', 'Bat Avg', 'Bat SR', 
+            'Runs', 'Bat Avg', 'Bat SR', 'Bound %',
             'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 'Extras/Ov',
             'Fielding', 
             'Bat Rtg', 'Bowl Rtg', 'Field Rtg', 'Scout Rating', 'AI Rating', 
@@ -291,6 +322,7 @@ with tab1:
                 'Fielding': '{:.0f}',
                 'Bat Avg': '{:.2f}',
                 'Bat SR': '{:.1f}',
+                'Bound %': '{:.1f}%',
                 'Bowl Avg': '{:.2f}',
                 'Bowl SR': '{:.1f}',
                 'Econ': '{:.2f}',
@@ -346,8 +378,8 @@ with tab3:
                 st.markdown(f"**AI Rating:** {p_data['AI Rating']:.1f}/30.0")
                 st.markdown(f"**Drafted To:** {p_data['Draft Status']}")
                 st.markdown("---")
-                st.markdown(f"**Total Runs:** {int(p_data['Runs_bat'])} *(Avg: {p_data['Bat Avg']:.2f}, SR: {p_data['SR_bat']:.1f}, Balls/Dismissal: {p_data['Bat BPD']:.1f})*")
-                st.markdown(f"**Total Wkts:** {int(p_data['Wkts'])} *(Econ: {p_data['Econ']:.2f}, SR: {p_data['Bowl SR']:.1f}, Extras/Ov: {p_data['Extras_Rate']:.2f})*")
+                st.markdown(f"**Total Runs:** {int(p_data['Runs_bat'])} *(Avg: {p_data['Bat Avg']:.2f}, SR: {p_data['SR_bat']:.1f}, Bound %: {p_data['Boundary_Pct']:.1f}%)*")
+                st.markdown(f"**Total Wkts:** {int(p_data['Wkts'])} *(Avg: {p_data['Bowl Avg']:.2f}, SR: {p_data['Bowl SR']:.1f}, Econ: {p_data['Econ']:.2f})*")
                 st.markdown(f"**Fielding Dismissals:** {int(p_data['Total_Fielding'])}")
                 
                 st.markdown("---")
@@ -363,11 +395,12 @@ with tab3:
                             st.write(f"- **{evaluator}**: Legacy Score Ignored")
 
             with pc2:
-                categories = ['Batting Volume', 'Strike Rate', 'Wicket Taking', 'Economy', 'Bowling Discipline', 'Fielding Impact']
+                categories = ['Batting Volume', 'Strike Rate', 'Boundary Threat', 'Wicket Taking', 'Economy (Reversed)', 'Bowling Discipline', 'Fielding Impact']
                 r_bat = (p_data['Bat_Score'] - master_df['Bat_Score'].min()) / (master_df['Bat_Score'].max() - master_df['Bat_Score'].min() + 0.01)
                 r_sr = (p_data['SR_bat'] - master_df['SR_bat'].min()) / (master_df['SR_bat'].max() - master_df['SR_bat'].min() + 0.01)
-                r_bowl = (p_data['Bowl_Score'] - master_df['Bowl_Score'].min()) / (master_df['Bowl_Score'].max() - master_df['Bowl_Score'].min() + 0.01)
+                r_bound = (p_data['Boundary_Score'] - master_df['Boundary_Score'].min()) / (master_df['Boundary_Score'].max() - master_df['Boundary_Score'].min() + 0.01)
                 
+                r_bowl = (p_data['Bowl_Score'] - master_df['Bowl_Score'].min()) / (master_df['Bowl_Score'].max() - master_df['Bowl_Score'].min() + 0.01)
                 r_econ = 1 - ((p_data['Econ'] - master_df['Econ'].min()) / (master_df['Econ'].max() - master_df['Econ'].min() + 0.01))
                 if p_data['Econ'] == 0 or p_data['Econ'] == 999: r_econ = 0
                 
@@ -378,9 +411,9 @@ with tab3:
                 
                 fig = go.Figure()
                 fig.add_trace(go.Scatterpolar(
-                    r=[r_bat, r_sr, r_bowl, r_econ, r_disc, r_field, r_bat], theta=categories + [categories[0]], fill='toself', line_color='orange'
+                    r=[r_bat, r_sr, r_bound, r_bowl, r_econ, r_disc, r_field, r_bat], theta=categories + [categories[0]], fill='toself', line_color='orange'
                 ))
-                fig.update_layout(polar=dict(radialaxis=dict(visible=False, range=[0, 1])), showlegend=False, title="Skill Hexagon")
+                fig.update_layout(polar=dict(radialaxis=dict(visible=False, range=[0, 1])), showlegend=False, title="Skill Heptagon")
                 st.plotly_chart(fig, use_container_width=True)
 
 # --- TAB 4: COMMITTEE SCOUTING ---
@@ -463,8 +496,8 @@ with tab5:
     To create maximum separation between players and ensure a fair draft, the BPL Engine parses Batting, Bowling, and Fielding metrics, standardizes them, and forces them into a Bell-Curve distribution.
 
     ### 1. Expanded Core Metrics
-    The engine now calculates **7 granular data points** to separate players:
-    *   **Batting Score:** Total Runs (25%), Batting Avg (35%), Strike Rate (25%), and **Balls Per Dismissal (15%)**. *(BPD rewards top-order anchors who protect against batting collapses).*
+    The engine now calculates **8 granular data points** to separate players:
+    *   **Batting Score:** Total Runs (20%), Batting Avg (30%), Strike Rate (25%), Balls Per Dismissal (10%), and **Boundary Impact (15%)**. *(Boundary Impact rewards players who generate a massive percentage of their runs purely via 4s and 6s, breaking field placements).*
     *   **Bowling Score:** Total Wickets (30%), Economy Rate (25%), Bowling Avg (20%), Bowling Strike Rate (15%), and **Bowling Discipline (10%)**. *(Discipline is measured by Extras Per Over, heavily penalizing bowlers who hand out free runs via Wides and No Balls).*
     *   **Fielding Score:** The sum of all Catches, Run-Outs, and Stumpings.
 
@@ -479,10 +512,8 @@ with tab5:
     * **Bowler (Bowled 18+ balls):** Bowling Score (85%) + Fielding (15%)
     * **All-Rounder:** `[(Batting * 42.5%) + (Bowling * 42.5%) + (Fielding * 15%)] * 1.3 Multiplier`
     
-    ### 4. T-Score Distribution (Solving the Clumping)
-    Instead of a simple Min-Max scale that squishes everyone into a narrow band, the engine uses a **Standard Normal Distribution (T-Score)**. 
-    
-    The absolute league average player is hardcoded to receive exactly a **20.0 AI Rating**. The algorithm applies a 3.33 standard deviation spread, naturally fanning the players out across the 10.0 to 30.0 range. This creates beautiful separation so you no longer have 15 players tied at 14.1!
+    ### 4. T-Score Distribution
+    The absolute league average player is hardcoded to receive exactly a **20.0 AI Rating**. The algorithm applies a 3.33 standard deviation spread, naturally fanning the players out across the 10.0 to 30.0 range.
     """)
 
 # --- TAB 6: ADMIN & DATA ---
