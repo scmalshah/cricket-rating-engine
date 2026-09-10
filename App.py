@@ -43,8 +43,8 @@ DEFAULT_WEIGHTS = {
 
 DEFAULT_CONFIG = {
     "gsheet_url": "https://docs.google.com/spreadsheets/d/16j0UEOr_DN-kDNjyFt65IxJxnuEWjyto4o_4ShA4SN0/edit?resourcekey=&gid=436661694#gid=436661694",
-    "gsheet_col": "Full name",
-    "gsheet_pool_col": "How do you want to play"
+    "gsheet_col": "Full Name",
+    "gsheet_pool_col": "How do you want to play?"
 }
 
 # --- HELPER FUNCTIONS ---
@@ -119,7 +119,8 @@ def get_raw_live_roster(url, col_name, pool_col_name):
     if not url or not col_name: return pd.DataFrame()
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
-        df = conn.read(spreadsheet=url)
+        # BUGFIX: ttl=0 forces the connection library to bypass its internal cache and pull live data
+        df = conn.read(spreadsheet=url, ttl=0)
         
         match_col = next((c for c in df.columns if str(c).strip().lower() == col_name.strip().lower()), None)
         match_pool_col = next((c for c in df.columns if pool_col_name and str(c).strip().lower() == pool_col_name.strip().lower()), None)
@@ -129,7 +130,6 @@ def get_raw_live_roster(url, col_name, pool_col_name):
             res['Raw_Name'] = df[match_col].dropna().astype(str).apply(clean_prefix).str.strip()
             res = res[res['Raw_Name'] != ""]
             
-            # Map the Form's answer to our system's "Pool Player" vs "Team Player" string
             if match_pool_col:
                 res['Form_Pool_Status'] = df[match_pool_col].astype(str).fillna("")
                 def parse_pool(val):
@@ -333,9 +333,7 @@ excel_master_df = calculate_ratings(raw_bat_cache, raw_bowl_cache, raw_field_cac
 
 # --- GOOGLE SHEET LIVE INTEGRATION ---
 if not raw_live_df.empty:
-    # Map the raw form names so they fuse with the Excel stats
     raw_live_df['Player'] = raw_live_df['Raw_Name'].map(lambda x: saved_mapping.get(x, x))
-    # Keep the last entry if someone submitted the form multiple times
     roster_df = raw_live_df.groupby('Player').last().reset_index()[['Player', 'Form_Pool_Status']]
     
     if not excel_master_df.empty:
@@ -363,7 +361,6 @@ if not master_df.empty:
     master_df['Draft Status'] = master_df['Player'].apply(lambda x: draft_state.get(x, "Available"))
     master_df['Leadership'] = master_df['Player'].apply(lambda x: leadership_state.get(x, "None"))
     
-    # Priority for Pool Status: 1. Manual Admin Override -> 2. Live Google Form choice -> 3. Default "Team Player"
     def determine_pool_status(row):
         admin_override = pool_state.get(row['Player'])
         if admin_override:
@@ -423,7 +420,6 @@ with tab1:
 
         disp_df['Player'] = disp_df.apply(lambda r: f"{r['Player']} (C)" if r['Leadership'] == 'Captain' else (f"{r['Player']} (VC)" if r['Leadership'] == 'Vice Captain' else r['Player']), axis=1)
 
-        # STRICT COLUMN ENFORCEMENT
         col_order = [
             'Player', 'Role', 'Tier', 'Pool Status',
             'Runs_bat', 'Bat Avg', 'SR_bat', 'Boundary_Pct',
@@ -906,8 +902,8 @@ with tab7:
         
         g1, g2, g3 = st.columns([2, 1, 1])
         new_gsheet_url = g1.text_input("Google Sheet URL", value=app_config.get("gsheet_url", ""))
-        new_gsheet_col = g2.text_input("Header: Names", value=app_config.get("gsheet_col", "Full name"))
-        new_gsheet_pool_col = g3.text_input("Header: Pool Status", value=app_config.get("gsheet_pool_col", "How do you want to play"))
+        new_gsheet_col = g2.text_input("Header: Names", value=app_config.get("gsheet_col", "Full Name"))
+        new_gsheet_pool_col = g3.text_input("Header: Pool Status", value=app_config.get("gsheet_pool_col", "How do you want to play?"))
         
         if st.button("🔗 Sync Google Roster"):
             app_config["gsheet_url"] = new_gsheet_url
