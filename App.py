@@ -247,9 +247,28 @@ with tab1:
         if status_f == "Available Only": disp_df = disp_df[disp_df['Draft Status'] == "Available"]
         elif status_f != "All Players": disp_df = disp_df[disp_df['Draft Status'] == status_f]
 
-        # Formatting Output Columns - NOW INCLUDES INDIVIDUAL RATINGS
-        disp_df = disp_df[['Player', 'Role', 'Tier', 'Runs_bat', 'Bat Avg', 'SR_bat', 'Bat_Rating', 'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 'Bowl_Rating', 'Total_Fielding', 'Field_Rating', 'AI Rating', 'Avg Scout Score', 'Draft Status']].sort_values('AI Rating', ascending=False)
-        disp_df.columns = ['Player', 'Role', 'Tier', 'Runs', 'Bat Avg', 'Bat SR', 'Bat Rtg', 'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 'Bowl Rtg', 'Fielding', 'Field Rtg', 'AI Rating', 'Scout Rating', 'Draft Status']
+        # REORDERED COLUMNS: Pushed all ratings to the right
+        col_order = [
+            'Player', 'Role', 'Tier', 
+            'Runs_bat', 'Bat Avg', 'SR_bat', 
+            'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 
+            'Total_Fielding', 
+            'Bat_Rating', 'Bowl_Rating', 'Field_Rating', 'Avg Scout Score', 'AI Rating', 
+            'Draft Status'
+        ]
+        disp_df = disp_df[col_order].sort_values('AI Rating', ascending=False)
+        
+        disp_df.columns = [
+            'Player', 'Role', 'Tier', 
+            'Runs', 'Bat Avg', 'Bat SR', 
+            'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 
+            'Fielding', 
+            'Bat Rtg', 'Bowl Rtg', 'Field Rtg', 'Scout Rating', 'AI Rating', 
+            'Draft Status'
+        ]
+        
+        # FREEZE PLAYER COLUMN: Set 'Player' as the index so Streamlit freezes it when scrolling
+        disp_df = disp_df.set_index('Player')
         
         styled_df = disp_df.style.background_gradient(subset=['AI Rating'], cmap='RdYlGn', vmin=10, vmax=30)\
             .format({
@@ -258,17 +277,18 @@ with tab1:
                 'Fielding': '{:.0f}',
                 'Bat Avg': '{:.2f}',
                 'Bat SR': '{:.1f}',
-                'Bat Rtg': '{:.1f}',
                 'Bowl Avg': '{:.2f}',
                 'Bowl SR': '{:.1f}',
                 'Econ': '{:.2f}',
+                'Bat Rtg': '{:.1f}',
                 'Bowl Rtg': '{:.1f}',
                 'Field Rtg': '{:.1f}',
-                'AI Rating': '{:.1f}',
-                'Scout Rating': '{:.1f}'
+                'Scout Rating': '{:.1f}',
+                'AI Rating': '{:.1f}'
             }, na_rep="-")
             
-        st.dataframe(styled_df, use_container_width=True, hide_index=True)
+        # Displaying with the index visible
+        st.dataframe(styled_df, use_container_width=True)
 
 # --- TAB 2: TEAM ANALYTICS ---
 with tab2:
