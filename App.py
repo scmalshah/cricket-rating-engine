@@ -4,6 +4,7 @@ import numpy as np
 import os
 import json
 import re
+import urllib.parse
 import plotly.graph_objects as go
 import plotly.express as px
 
@@ -37,6 +38,11 @@ DEFAULT_WEIGHTS = {
     "wt_bowler_bowl": 85.0, "wt_bowler_field": 15.0,
     "wt_ar_bat": 42.5, "wt_ar_bowl": 42.5, "wt_ar_field": 15.0, "ar_multiplier": 1.3,
     "squad_size": 11, "team_budget": 240.0
+}
+
+DEFAULT_CONFIG = {
+    "gsheet_url": "https://docs.google.com/spreadsheets/d/16j0UEOr_DN-kDNjyFt65IxJxnuEWjyto4o_4ShA4SN0/edit?resourcekey=&gid=436661694#gid=436661694",
+    "gsheet_col": "Full name"
 }
 
 # --- HELPER FUNCTIONS ---
@@ -94,7 +100,7 @@ pool_state = load_json(POOL_FILE, {})
 human_ratings = load_json(RATINGS_FILE, {}) 
 scout_overrides = load_json(OVERRIDES_FILE, {})
 auth_users = load_json(USERS_FILE, ["Admin", "Captain 1", "Captain 2"])
-app_config = load_json(CONFIG_FILE, {"gsheet_url": "", "gsheet_col": "Player Name"})
+app_config = load_json(CONFIG_FILE, DEFAULT_CONFIG)
 TEAMS = ["Available", "Team 1", "Team 2", "Team 3", "Team 4", "Team 5"]
 
 algo_weights = load_json(WEIGHTS_FILE, DEFAULT_WEIGHTS)
@@ -110,23 +116,24 @@ st.markdown("Advanced AI Rating, Live Roster Management, and Committee Ratings."
 def get_live_roster(url, col_name, mapping):
     if not url or not col_name: return []
     try:
-        # Automatically transform standard Google Sheet link into a CSV export link
-        if "/edit" in url:
-            csv_url = re.sub(r'/edit.*', '/export?format=csv', url)
-        else:
-            csv_url = url
-            
-        df = pd.read_csv(csv_url)
-        # Find exact column or loosely match to prevent capitalization crashes
-        match_col = next((c for c in df.columns if c.strip().lower() == col_name.strip().lower()), None)
+        sheet_id_match = re.search(r'/spreadsheets/d/([a-zA-Z0-9-_]+)', url)
+        if not sheet_id_match:
+            return []
+        spreadsheet_id = sheet_id_match.group(1)
         
+        gid_match = re.search(r'[#&?]gid=([0-9]+)', url)
+        gid = gid_match.group(1) if gid_match else "0"
+        
+        csv_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export?format=csv&gid={gid}"
+        df = pd.read_csv(csv_url)
+        
+        match_col = next((c for c in df.columns if c.strip().lower() == col_name.strip().lower()), None)
         if match_col:
             names = df[match_col].dropna().astype(str).apply(clean_prefix)
             mapped_names = names.map(mapping).fillna(names).unique().tolist()
-            return sorted(mapped_names)
-        else:
-            return []
-    except Exception as e:
+            return sorted([n for n in mapped_names if n.strip()])
+        return []
+    except Exception:
         return []
 
 @st.cache_data(show_spinner="Reading Excel File (Only happens once)...")
@@ -317,7 +324,6 @@ if live_roster_names:
     else:
         master_df = roster_df
         
-    # Grant default baseline AI ratings to completely new rookies pulled from Google Forms
     master_df['AI Rating'] = master_df['AI Rating'].fillna(20.0)
     master_df['Bat_Rating'] = master_df['Bat_Rating'].fillna(20.0)
     master_df['Bowl_Rating'] = master_df['Bowl_Rating'].fillna(20.0)
@@ -325,13 +331,11 @@ if live_roster_names:
     master_df['Role'] = master_df['Role'].fillna('Batter')
     master_df['Tier'] = pd.cut(master_df['AI Rating'], bins=[0, 16.9, 22.9, 26.9, 31], labels=["Bronze", "Silver", "Gold", "Platinum"])
     
-    # Fill missing raw stats with 0 for new players so table doesn't crash
     stat_cols = ['Runs_bat', 'Bat Avg', 'SR_bat', 'Boundary_Pct', 'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 'Extras_Rate', 'Total_Fielding']
     for c in stat_cols:
         if c not in master_df.columns: master_df[c] = 0
         master_df[c] = master_df[c].fillna(0)
 else:
-    # Fallback to pure Excel if no Google Sheet is connected
     master_df = excel_master_df
 
 if not master_df.empty:
@@ -390,7 +394,6 @@ with tab1:
 
         disp_df['Player'] = disp_df.apply(lambda r: f"{r['Player']} (C)" if r['Leadership'] == 'Captain' else (f"{r['Player']} (VC)" if r['Leadership'] == 'Vice Captain' else r['Player']), axis=1)
 
-        # STRICT COLUMN ENFORCEMENT
         col_order = [
             'Player', 'Role', 'Tier', 'Pool Status',
             'Runs_bat', 'Bat Avg', 'SR_bat', 'Boundary_Pct',
@@ -873,14 +876,13 @@ with tab7:
         
         g1, g2 = st.columns([3, 1])
         new_gsheet_url = g1.text_input("Google Sheet URL", value=app_config.get("gsheet_url", ""))
-        new_gsheet_col = g2.text_input("Column Header for Names", value=app_config.get("gsheet_col", "Player Name"))
+        new_gsheet_col = g2.text_input("Column Header for Names", value=app_config.get("gsheet_col", "Full name"))
         
         if st.button("🔗 Sync Google Roster"):
             app_config["gsheet_url"] = new_gsheet_url
             app_config["gsheet_col"] = new_gsheet_col
             save_json(CONFIG_FILE, app_config)
             st.success("Google Sheet configuration saved! Roster has been updated.")
-            # Clear the cache for the live roster explicitly
             get_live_roster.clear()
             st.rerun()
 
@@ -919,7 +921,7 @@ with tab7:
                     st.success("Draft, Leadership, and Pool updated!")
                     st.rerun()
             else:
-                st.info("Upload data first.")
+                st.info("Upload data or connect Google Sheet first.")
 
         with ac2:
             st.markdown("**3. Authorized Evaluators**")
@@ -1031,7 +1033,7 @@ with tab7:
                 "leadership": load_json(LEADERSHIP_FILE, {}),
                 "pool": load_json(POOL_FILE, {}),
                 "overrides": load_json(OVERRIDES_FILE, {}),
-                "config": load_json(CONFIG_FILE, {"gsheet_url": "", "gsheet_col": "Player Name"})
+                "config": load_json(CONFIG_FILE, DEFAULT_CONFIG)
             }
             backup_json = json.dumps(backup_data, indent=2).encode('utf-8')
             st.download_button(
