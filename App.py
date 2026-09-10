@@ -16,6 +16,7 @@ DRAFT_FILE = "draft_state.json"
 RATINGS_FILE = "human_ratings.json"
 USERS_FILE = "authorized_users.json"
 WEIGHTS_FILE = "algo_weights.json"
+LEADERSHIP_FILE = "leadership.json"
 
 ADMIN_PASSWORD = "bpladmin" 
 
@@ -31,7 +32,8 @@ DEFAULT_WEIGHTS = {
     "bowl_wkts": 30.0, "bowl_econ": 25.0, "bowl_avg": 20.0, "bowl_sr": 15.0, "bowl_extras": 10.0,
     "wt_batter_bat": 85.0, "wt_batter_field": 15.0,
     "wt_bowler_bowl": 85.0, "wt_bowler_field": 15.0,
-    "wt_ar_bat": 42.5, "wt_ar_bowl": 42.5, "wt_ar_field": 15.0, "ar_multiplier": 1.3
+    "wt_ar_bat": 42.5, "wt_ar_bowl": 42.5, "wt_ar_field": 15.0, "ar_multiplier": 1.3,
+    "squad_size": 11, "team_budget": 240.0
 }
 
 # --- HELPER FUNCTIONS ---
@@ -68,12 +70,12 @@ for original, merged in DEFAULT_MAPPINGS.items():
 if mapping_changed: save_json(MAPPING_FILE, saved_mapping)
 
 draft_state = load_json(DRAFT_FILE, {}) 
+leadership_state = load_json(LEADERSHIP_FILE, {})
 human_ratings = load_json(RATINGS_FILE, {}) 
 auth_users = load_json(USERS_FILE, ["Admin", "Captain 1", "Captain 2"])
 TEAMS = ["Available", "Team 1", "Team 2", "Team 3", "Team 4", "Team 5"]
 
 algo_weights = load_json(WEIGHTS_FILE, DEFAULT_WEIGHTS)
-# Ensure any missing keys in an old save get populated with defaults
 for k, v in DEFAULT_WEIGHTS.items():
     if k not in algo_weights: algo_weights[k] = v
 
@@ -121,11 +123,9 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w):
     if not rbowl.empty: rbowl['Player'] = rbowl['Player'].map(mapping).fillna(rbowl['Player'])
     if not rfield.empty: rfield['Player'] = rfield['Player'].map(mapping).fillna(rfield['Player'])
 
-    # Search for Boundary Columns dynamically
     fours_col = next((c for c in rbat.columns if str(c).lower().strip() in ['4s', 'fours', '4', "4's"]), None)
     sixes_col = next((c for c in rbat.columns if str(c).lower().strip() in ['6s', 'sixes', '6', "6's"]), None)
 
-    # Aggregate Batting
     for col in ['Runs', 'SR', 'Inns', 'NO']:
         rbat[col] = pd.to_numeric(rbat.get(col, 0), errors='coerce').fillna(0)
     
@@ -146,7 +146,6 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w):
     
     agg_bat = rbat.groupby('Player').agg(**bat_agg_kwargs).reset_index()
 
-    # Aggregate Bowling
     extras = np.zeros(len(rbowl))
     if not rbowl.empty:
         for col in rbowl.columns:
@@ -163,7 +162,6 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w):
     else:
         agg_bowl = pd.DataFrame(columns=['Player', 'Balls_Bowled', 'Runs_bowl', 'Wkts', 'Total_Extras'])
 
-    # Aggregate Fielding
     if not rfield.empty:
         for col in rfield.columns:
             if col != 'Player': rfield[col] = pd.to_numeric(rfield[col], errors='coerce').fillna(0)
@@ -181,7 +179,6 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w):
     if 'Fours' not in valid.columns: valid['Fours'] = 0
     if 'Sixes' not in valid.columns: valid['Sixes'] = 0
     
-    # Standardize Stats
     valid['Bound_Runs'] = (valid['Fours'] * 4) + (valid['Sixes'] * 6)
     valid['Boundary_Pct'] = np.where(valid['Runs_bat'] > 0, (valid['Bound_Runs'] / valid['Runs_bat']) * 100, 0)
     valid['SR_bat'] = np.where(valid['Balls_Faced'] > 0, (valid['Runs_bat'] / valid['Balls_Faced']) * 100, 0)
@@ -193,7 +190,6 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w):
     valid['Extras_Rate'] = np.where(valid['Balls_Bowled'] > 0, (valid['Total_Extras'] / valid['Balls_Bowled']) * 6, 0)
     valid['Overs'] = valid['Balls_Bowled'].apply(format_overs)
 
-    # Bayesian Smoothing
     mean_avg = valid['Runs_bat'].sum() / (valid['Dismissals'].sum() or 1)
     mean_bpd = valid['Balls_Faced'].sum() / (valid['Dismissals'].sum() or 1)
     mean_bowl_sr = valid['Balls_Bowled'].sum() / (valid['Wkts'].sum() or 1)
@@ -211,7 +207,6 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w):
     valid['Sm_Bowl_SR'] = (valid['Balls_Bowled'] + (mean_bowl_sr * 5)) / (valid['Wkts'] + 5)
     valid['Sm_Extras'] = ((valid['Total_Extras'] + (mean_extras_rate / 6 * 30)) / (valid['Balls_Bowled'] + 30)) * 6
 
-    # Z-Scores
     z_runs = (valid['Runs_bat'] - valid['Runs_bat'].mean()) / (valid['Runs_bat'].std() or 1)
     z_avg = (valid['Sm_Avg'] - valid['Sm_Avg'].mean()) / (valid['Sm_Avg'].std() or 1)
     z_sr = (valid['Sm_SR'] - valid['Sm_SR'].mean()) / (valid['Sm_SR'].std() or 1)
@@ -226,7 +221,6 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w):
     
     valid['Fielding_Score'] = (valid['Total_Fielding'] - valid['Total_Fielding'].mean()) / (valid['Total_Fielding'].std() or 1)
 
-    # --- DYNAMIC NORMALIZATION & WEIGHT CALCULATION ---
     bat_tot = w['bat_runs'] + w['bat_avg'] + w['bat_sr'] + w['bat_bpd'] + w['bat_bound'] or 1
     bowl_tot = w['bowl_wkts'] + w['bowl_econ'] + w['bowl_avg'] + w['bowl_sr'] + w['bowl_extras'] or 1
     
@@ -234,7 +228,6 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w):
     valid['Bowl_Score'] = (z_wkts * (w['bowl_wkts']/bowl_tot)) + (z_econ * (w['bowl_econ']/bowl_tot)) + (z_avg_bowl * (w['bowl_avg']/bowl_tot)) + (z_bowl_sr * (w['bowl_sr']/bowl_tot)) + (z_extras * (w['bowl_extras']/bowl_tot))
     valid['Boundary_Score'] = z_bound 
 
-    # Role Logic
     valid['Role'] = valid.apply(lambda r: 'All-Rounder' if r['Balls_Faced'] >= 15 and r['Balls_Bowled'] >= 18 else ('Bowler' if r['Balls_Bowled'] >= 18 else 'Batter'), axis=1)
     
     def calc_final(r):
@@ -251,7 +244,6 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w):
         
     valid['Final_Raw'] = valid.apply(calc_final, axis=1)
 
-    # --- T-SCORE DISTRIBUTION ---
     mean_raw = valid['Final_Raw'].mean()
     std_raw = valid['Final_Raw'].std() or 1
     
@@ -267,11 +259,8 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w):
     valid['Tier'] = pd.cut(valid['AI Rating'], bins=[0, 16.9, 22.9, 26.9, 31], labels=["Bronze", "Silver", "Gold", "Platinum"])
     return valid
 
-# Execution Engine
 file_time = os.path.getmtime(DATA_FILE) if os.path.exists(DATA_FILE) else 0
 raw_bat_cache, raw_bowl_cache, raw_field_cache, all_raw_names = get_raw_excel_data(file_time)
-
-# Notice we pass the custom weights dictionary into the calculation!
 master_df = calculate_ratings(raw_bat_cache, raw_bowl_cache, raw_field_cache, saved_mapping, algo_weights)
 
 if not master_df.empty:
@@ -287,9 +276,10 @@ if not master_df.empty:
     
     master_df['Avg Scout Score'] = master_df['Player'].apply(get_avg_scout)
     master_df['Draft Status'] = master_df['Player'].apply(lambda x: draft_state.get(x, "Available"))
+    master_df['Leadership'] = master_df['Player'].apply(lambda x: leadership_state.get(x, "None"))
 
 # --- UI TABS ---
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["🏆 Live Draft Board", "📊 Team Analytics", "🕸️ Player Profiles", "📝 Committee Scouting", "🧠 Methodology", "⚙️ Admin & Data"])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["🏆 Live Draft Board", "🎯 Snake Draft Room", "📊 Team Analytics", "🕸️ Player Profiles", "📝 Committee Scouting", "🧠 Methodology", "⚙️ Admin & Data"])
 
 # --- TAB 1: DRAFT BOARD ---
 with tab1:
@@ -312,6 +302,9 @@ with tab1:
         if role_f != "All": disp_df = disp_df[disp_df['Role'] == role_f]
         if status_f == "Available Only": disp_df = disp_df[disp_df['Draft Status'] == "Available"]
         elif status_f != "All Players": disp_df = disp_df[disp_df['Draft Status'] == status_f]
+
+        # Apply Visual Tags for Captains/VCs
+        disp_df['Player'] = disp_df.apply(lambda r: f"{r['Player']} (C)" if r['Leadership'] == 'Captain' else (f"{r['Player']} (VC)" if r['Leadership'] == 'Vice Captain' else r['Player']), axis=1)
 
         col_order = [
             'Player', 'Role', 'Tier', 
@@ -345,15 +338,118 @@ with tab1:
             
         st.dataframe(styled_df, use_container_width=True)
 
-# --- TAB 2: TEAM ANALYTICS ---
+# --- TAB 2: SNAKE DRAFT ROOM ---
 with tab2:
+    if master_df.empty:
+        st.info("Data required.")
+    else:
+        st.subheader("🎯 Live Snake Draft & Salary Cap Room")
+        st.write("Captains take turns picking players. You must stay under your total Point Limit while filling all roster spots.")
+        
+        squad_size = int(algo_weights.get("squad_size", 11))
+        team_budget = float(algo_weights.get("team_budget", 240.0))
+        
+        draft_pass = st.text_input("Enter Admin Password to unlock drafting", type="password", key="draft_pass")
+        
+        valid_teams = [t for t in TEAMS if t != "Available"]
+        num_teams = len(valid_teams)
+        drafted_df = master_df[master_df['Draft Status'] != "Available"]
+        num_drafted = len(drafted_df)
+        
+        # Determine Snake Order Turn (Automatically accounts for pre-drafted Captains!)
+        round_num = (num_drafted // num_teams) + 1
+        pick_in_round = num_drafted % num_teams
+        if (round_num % 2) != 0:
+            on_the_clock = valid_teams[pick_in_round]
+        else:
+            on_the_clock = valid_teams[num_teams - 1 - pick_in_round]
+            
+        st.markdown(f"### 🟢 ON THE CLOCK: **{on_the_clock}** (Round {round_num}, Pick {pick_in_round + 1})")
+        
+        # Live Salary Cap Dashboard
+        cap_data = []
+        for t in valid_teams:
+            t_df = master_df[master_df['Draft Status'] == t]
+            spent = t_df['AI Rating'].sum()
+            rem = team_budget - spent
+            cap_data.append({"Team": t, "Roster": f"{len(t_df)} / {squad_size}", "Budget": team_budget, "Spent": spent, "Remaining": rem})
+        cap_df = pd.DataFrame(cap_data)
+        
+        st.markdown("#### 💰 Franchise Point Budgets")
+        st.dataframe(cap_df.style.format({"Budget": "{:.1f}", "Spent": "{:.1f}", "Remaining": "{:.1f}"}), hide_index=True, use_container_width=True)
+        
+        avail_df = master_df[master_df['Draft Status'] == "Available"].sort_values('AI Rating', ascending=False)
+        
+        if avail_df.empty or num_drafted >= (num_teams * squad_size):
+            st.success("🎉 The Draft is Complete! All rosters are full.")
+        else:
+            c1, c2, c3 = st.columns([3, 2, 2])
+            with c1:
+                player_opts = avail_df['Player'] + " (Cost: " + avail_df['AI Rating'].astype(str) + " | " + avail_df['Role'] + ")"
+                opt_to_player = dict(zip(player_opts, avail_df['Player']))
+                selected_opt = st.selectbox("Select Player to Draft:", player_opts.tolist())
+                selected_player = opt_to_player[selected_opt]
+                
+            with c2:
+                snake_index = valid_teams.index(on_the_clock)
+                selected_team = st.selectbox("Drafting Team:", valid_teams, index=snake_index)
+                
+            with c3:
+                st.write("")
+                st.write("")
+                if st.button(f"🎯 DRAFT TO {selected_team.upper()}", type="primary", use_container_width=True):
+                    if draft_pass == ADMIN_PASSWORD:
+                        p_rating = avail_df[avail_df['Player'] == selected_player].iloc[0]['AI Rating']
+                        t_rem = cap_df[cap_df['Team'] == selected_team].iloc[0]['Remaining']
+                        t_count = len(master_df[master_df['Draft Status'] == selected_team])
+                        
+                        if t_count >= squad_size:
+                            st.error(f"❌ {selected_team} already has the maximum {squad_size} players.")
+                        elif p_rating > t_rem:
+                            st.error(f"❌ SALARY CAP EXCEEDED: {selected_team} only has {t_rem:.1f} points left, but {selected_player} costs {p_rating:.1f}.")
+                        elif (t_rem - p_rating) < (10.0 * (squad_size - t_count - 1)):
+                            min_req = 10.0 * (squad_size - t_count - 1)
+                            st.error(f"❌ INVALID PICK: Drafting {selected_player} leaves insufficient funds to fill the roster. (Save {min_req:.1f} points for remaining empty spots).")
+                        else:
+                            draft_state[selected_player] = selected_team
+                            save_json(DRAFT_FILE, draft_state)
+                            st.success(f"✅ {selected_player} successfully drafted to {selected_team} for {p_rating:.1f} points!")
+                            st.rerun()
+                    elif draft_pass != "":
+                        st.error("Incorrect password.")
+                    else:
+                        st.warning("Enter password to draft.")
+
+        st.markdown("---")
+        st.markdown("#### 📋 Live Team Rosters")
+        
+        team_cols = st.columns(num_teams)
+        for idx, t in enumerate(valid_teams):
+            with team_cols[idx]:
+                st.markdown(f"**{t}**")
+                team_roster = drafted_df[drafted_df['Draft Status'] == t].copy()
+                if team_roster.empty:
+                    st.write("*No picks yet*")
+                else:
+                    # Sort Captains -> Vice Captains -> Standard Players (by Rating)
+                    team_roster['L_Order'] = team_roster['Leadership'].map({"Captain": 0, "Vice Captain": 1, "None": 2})
+                    team_roster = team_roster.sort_values(['L_Order', 'AI Rating'], ascending=[True, False])
+                    
+                    for _, row in team_roster.iterrows():
+                        tag = ""
+                        if row['Leadership'] == 'Captain': tag = " **(C)**"
+                        elif row['Leadership'] == 'Vice Captain': tag = " **(VC)**"
+                        st.caption(f"• {row['Player']}{tag} ({row['AI Rating']})")
+
+# --- TAB 3: TEAM ANALYTICS ---
+with tab3:
     if master_df.empty:
         st.info("Data required.")
     else:
         st.subheader("Live Team Balance Analytics")
         drafted = master_df[master_df['Draft Status'] != "Available"]
         if drafted.empty:
-            st.info("No players drafted yet. Update Draft Status in the Admin tab.")
+            st.info("No players drafted yet. Use the Draft Room to begin.")
         else:
             team_stats = drafted.groupby('Draft Status').agg(
                 Players=('Player', 'count'), Total_AI_Rating=('AI Rating', 'sum'),
@@ -369,8 +465,8 @@ with tab2:
             
             st.dataframe(team_stats.style.format({'Avg_AI_Rating': "{:.1f}"}), use_container_width=True)
 
-# --- TAB 3: PLAYER PROFILES ---
-with tab3:
+# --- TAB 4: PLAYER PROFILES ---
+with tab4:
     if master_df.empty:
         st.info("Data required.")
     else:
@@ -379,10 +475,11 @@ with tab3:
         
         if selected_player:
             p_data = master_df[master_df['Player'] == selected_player].iloc[0]
+            tag = "🏆 *(Captain)*" if p_data['Leadership'] == 'Captain' else ("⭐ *(Vice Captain)*" if p_data['Leadership'] == 'Vice Captain' else "")
             
             pc1, pc2 = st.columns([1, 2])
             with pc1:
-                st.markdown(f"### {p_data['Player']}")
+                st.markdown(f"### {p_data['Player']} {tag}")
                 st.markdown(f"**Role:** {p_data['Role']} | **Tier:** {p_data['Tier']}")
                 st.markdown(f"**AI Rating:** {p_data['AI Rating']:.1f}/30.0")
                 st.markdown(f"**Drafted To:** {p_data['Draft Status']}")
@@ -425,8 +522,8 @@ with tab3:
                 fig.update_layout(polar=dict(radialaxis=dict(visible=False, range=[0, 1])), showlegend=False, title="Skill Heptagon")
                 st.plotly_chart(fig, use_container_width=True)
 
-# --- TAB 4: COMMITTEE SCOUTING ---
-with tab4:
+# --- TAB 5: COMMITTEE SCOUTING ---
+with tab5:
     if master_df.empty:
         st.info("Data required.")
     else:
@@ -500,8 +597,8 @@ with tab4:
             st.success(f"Score detailed breakdown saved for {scout_player}!")
             st.rerun()
 
-# --- TAB 5: METHODOLOGY ---
-with tab5:
+# --- TAB 6: METHODOLOGY ---
+with tab6:
     w = algo_weights
     st.subheader("🧠 How the AI Rating is Calculated")
     
@@ -524,8 +621,8 @@ with tab5:
     The absolute league average player is hardcoded to receive exactly a **20.0 AI Rating**. The algorithm applies a 3.33 standard deviation spread, naturally fanning the players out across the 10.0 to 30.0 range.
     """)
 
-# --- TAB 6: ADMIN & DATA ---
-with tab6:
+# --- TAB 7: ADMIN & DATA ---
+with tab7:
     st.subheader("⚙️ System Management")
     
     password_attempt = st.text_input("Enter Admin Password to unlock controls", type="password")
@@ -536,14 +633,29 @@ with tab6:
         
         ac1, ac2 = st.columns(2)
         with ac1:
-            st.markdown("**1. Live Draft Management**")
+            st.markdown("**1. Live Draft & Leadership Management**")
+            st.caption("Pre-assign Captains here. Their ratings will automatically deduct from their Team's salary cap.")
             if not master_df.empty:
-                draft_df = pd.DataFrame({"Player": master_df['Player'], "Draft Status": master_df['Draft Status']})
-                edited_draft = st.data_editor(draft_df, column_config={"Draft Status": st.column_config.SelectboxColumn(options=TEAMS)}, hide_index=True, use_container_width=True)
-                if st.button("💾 Save Draft Rosters"):
+                draft_df = pd.DataFrame({
+                    "Player": master_df['Player'], 
+                    "Draft Status": master_df['Draft Status'],
+                    "Leadership": master_df['Leadership']
+                })
+                edited_draft = st.data_editor(
+                    draft_df, 
+                    column_config={
+                        "Draft Status": st.column_config.SelectboxColumn(options=TEAMS),
+                        "Leadership": st.column_config.SelectboxColumn(options=["None", "Captain", "Vice Captain"])
+                    }, 
+                    hide_index=True, use_container_width=True
+                )
+                if st.button("💾 Save Draft Rosters & Roles"):
                     new_draft = dict(zip(edited_draft["Player"], edited_draft["Draft Status"]))
+                    new_leaders = dict(zip(edited_draft["Player"], edited_draft["Leadership"]))
+                    new_leaders = {k: v for k, v in new_leaders.items() if v != "None"} # Keep JSON clean
                     save_json(DRAFT_FILE, new_draft)
-                    st.success("Draft updated!")
+                    save_json(LEADERSHIP_FILE, new_leaders)
+                    st.success("Draft and Leadership updated!")
                     st.rerun()
             else:
                 st.info("Upload data first.")
@@ -566,8 +678,19 @@ with tab6:
                 st.rerun()
 
         st.markdown("---")
-        st.markdown("### 4. 🎛️ Algorithm Weight Tuning")
-        st.write("Modify the mathematical importance of each metric. The AI ratings will recalculate instantly. Inputs will auto-normalize if they do not equal 100%.")
+        st.markdown("### 4. 🎛️ Draft & Algorithm Settings")
+        st.write("Modify the mathematical importance of each metric, or configure the Salary Cap. The AI ratings will recalculate instantly.")
+        
+        st.markdown("##### 🎯 Salary Cap Rules")
+        sc1, sc2, sc3 = st.columns(3)
+        w_squad_size = sc1.number_input("Max Players Per Team", value=int(algo_weights.get("squad_size", 11)), step=1)
+        w_team_budget = sc2.number_input("Team Point Budget", value=float(algo_weights.get("team_budget", 240.0)), step=5.0)
+        
+        if not master_df.empty:
+            valid_teams_ct = len([t for t in TEAMS if t != "Available"])
+            ideal_pool = master_df.sort_values('AI Rating', ascending=False).head(valid_teams_ct * w_squad_size)
+            suggested_cap = ideal_pool['AI Rating'].sum() / valid_teams_ct
+            sc3.info(f"**Suggested Cap:** {suggested_cap:.1f} pts\n\n*(Based on top {valid_teams_ct * w_squad_size} available players)*")
         
         st.markdown("##### 🏏 Batting Metrics (%)")
         b1, b2, b3, b4, b5 = st.columns(5)
@@ -602,8 +725,9 @@ with tab6:
             w_wt_ar_field = st.number_input("Fielding % (AR)", value=float(algo_weights["wt_ar_field"]))
             w_ar_multiplier = st.number_input("AR Multiplier", value=float(algo_weights["ar_multiplier"]), step=0.1)
 
-        if st.button("⚙️ Save Custom Weights & Recalculate"):
+        if st.button("⚙️ Save Custom Settings & Recalculate"):
             new_weights = {
+                "squad_size": w_squad_size, "team_budget": w_team_budget,
                 "bat_runs": w_bat_runs, "bat_avg": w_bat_avg, "bat_sr": w_bat_sr, "bat_bpd": w_bat_bpd, "bat_bound": w_bat_bound,
                 "bowl_wkts": w_bowl_wkts, "bowl_econ": w_bowl_econ, "bowl_avg": w_bowl_avg, "bowl_sr": w_bowl_sr, "bowl_extras": w_bowl_extras,
                 "wt_batter_bat": w_wt_batter_bat, "wt_batter_field": w_wt_batter_field,
@@ -611,7 +735,7 @@ with tab6:
                 "wt_ar_bat": w_wt_ar_bat, "wt_ar_bowl": w_wt_ar_bowl, "wt_ar_field": w_wt_ar_field, "ar_multiplier": w_ar_multiplier
             }
             save_json(WEIGHTS_FILE, new_weights)
-            st.success("✅ Engine settings updated! Head to the Draft Board to see the shifts.")
+            st.success("✅ Engine settings updated! Head to the Draft Room to see the new Cap limits.")
             st.rerun()
 
         st.markdown("---")
@@ -641,7 +765,8 @@ with tab6:
                 "mappings": load_json(MAPPING_FILE, DEFAULT_MAPPINGS),
                 "draft": load_json(DRAFT_FILE, {}),
                 "ratings": load_json(RATINGS_FILE, {}),
-                "weights": load_json(WEIGHTS_FILE, DEFAULT_WEIGHTS)
+                "weights": load_json(WEIGHTS_FILE, DEFAULT_WEIGHTS),
+                "leadership": load_json(LEADERSHIP_FILE, {})
             }
             backup_json = json.dumps(backup_data, indent=2).encode('utf-8')
             st.download_button(
@@ -660,6 +785,7 @@ with tab6:
                 if "draft" in restore_data: save_json(DRAFT_FILE, restore_data.get("draft", {}))
                 if "ratings" in restore_data: save_json(RATINGS_FILE, restore_data.get("ratings", {}))
                 if "weights" in restore_data: save_json(WEIGHTS_FILE, restore_data.get("weights", {}))
+                if "leadership" in restore_data: save_json(LEADERSHIP_FILE, restore_data.get("leadership", {}))
                 st.success("✅ Server state fully restored!")
                 st.rerun()
     elif password_attempt != "":
