@@ -314,14 +314,26 @@ with tab1:
     else:
         st.subheader("Live Interactive Dashboard")
         
-        # Combined KPIs and Filters into a single horizontal row to save vertical space
-        c1, c2, c3, c4, c5, c6 = st.columns(6)
-        c1.metric("Total Players", len(master_df))
-        c2.metric("Available Players", len(master_df[master_df['Draft Status'] == "Available"]))
-        c3.metric("Platinum Tier", len(master_df[master_df['Tier'] == "Platinum"]))
-        c4.metric("Avg AI Rating", round(master_df['AI Rating'].mean(), 1))
-        role_f = c5.selectbox("Filter Role", ["All", "Batter", "Bowler", "All-Rounder"])
-        status_f = c6.selectbox("Filter Status", ["Available Only", "All Players"] + [t for t in TEAMS if t != "Available"])
+        # --- MOBILE-FRIENDLY HORIZONTAL KPIs ---
+        # Instead of using st.columns() which stacks vertically on phones, 
+        # this custom flex-box layout guarantees horizontal rendering everywhere to save space.
+        total_p = len(master_df)
+        avail_p = len(master_df[master_df['Draft Status'] == "Available"])
+        plat_p = len(master_df[master_df['Tier'] == "Platinum"])
+        avg_p = round(master_df['AI Rating'].mean(), 1)
+        
+        st.markdown(f"""
+        <div style="display: flex; justify-content: space-between; text-align: center; background-color: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 15px; border: 1px solid #e9ecef;">
+            <div style="flex: 1;"><span style="font-size: 0.85em; color: #6c757d; font-weight: 600; text-transform: uppercase;">Total Players</span><br><span style="font-size: 1.6em; font-weight: bold;">{total_p}</span></div>
+            <div style="flex: 1;"><span style="font-size: 0.85em; color: #6c757d; font-weight: 600; text-transform: uppercase;">Available</span><br><span style="font-size: 1.6em; font-weight: bold; color: #28a745;">{avail_p}</span></div>
+            <div style="flex: 1;"><span style="font-size: 0.85em; color: #6c757d; font-weight: 600; text-transform: uppercase;">Platinum Tier</span><br><span style="font-size: 1.6em; font-weight: bold; color: #6f42c1;">{plat_p}</span></div>
+            <div style="flex: 1;"><span style="font-size: 0.85em; color: #6c757d; font-weight: 600; text-transform: uppercase;">Avg AI Rating</span><br><span style="font-size: 1.6em; font-weight: bold;">{avg_p}</span></div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        f1, f2 = st.columns(2)
+        role_f = f1.selectbox("Filter Role", ["All", "Batter", "Bowler", "All-Rounder"])
+        status_f = f2.selectbox("Filter Status", ["Available Only", "All Players"] + [t for t in TEAMS if t != "Available"])
         
         disp_df = master_df.copy()
         if role_f != "All": disp_df = disp_df[disp_df['Role'] == role_f]
@@ -518,7 +530,7 @@ with tab3:
         st.subheader("Live Team Balance Analytics")
         drafted = master_df[master_df['Draft Status'] != "Available"]
         if drafted.empty:
-            st.info("No players drafted yet. Use Team Selection to begin.")
+            st.info("No players drafted yet. Use the Team Selection tab to begin.")
         else:
             team_stats = drafted.groupby('Draft Status').agg(
                 Players=('Player', 'count'), Total_AI_Rating=('AI Rating', 'sum'),
