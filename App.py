@@ -598,8 +598,8 @@ with tab5:
         evaluator = st.selectbox("Select Your Name", auth_users)
         
         st.markdown("---")
-        st.markdown("### 🔍 1. Single Player Deep Dive & Peer Benchmarking")
-        st.write("Use this tool to evaluate specific player skills and instantly see AI peers with similar scores.")
+        st.markdown("### 🔍 1. Single Player Deep Dive")
+        st.write("Use this tool to evaluate specific player skills interactively.")
         
         sc1, sc2 = st.columns(2)
         scout_player = sc1.selectbox("Select Player to Rate", master_df.sort_values('Player')['Player'])
@@ -665,16 +665,16 @@ with tab5:
 
         st.markdown("---")
         st.markdown("### 📋 2. Mass Scouting & Overrides Table")
-        st.write("Edit final scores directly in the table. The **Closest AI Peers** column shows similar players based on their overall rating.")
+        st.write("Edit final scores directly in the table. The **Peer** columns display the closest matching players (±1.5 pts) for Batting, Bowling, and Fielding respectively.")
         
-        # Helper to get overall AI peers for the table display
-        def get_total_peers(player_name, rating):
+        # Helper to get specific skill peers for the table display
+        def get_skill_peers(player_name, rating, skill_col):
             min_v, max_v = rating - 1.5, rating + 1.5
-            peers = master_df[(master_df['AI Rating'] >= min_v) & (master_df['AI Rating'] <= max_v) & (master_df['Player'] != player_name)].copy()
+            peers = master_df[(master_df[skill_col] >= min_v) & (master_df[skill_col] <= max_v) & (master_df['Player'] != player_name)].copy()
             if peers.empty: return "None"
-            peers['diff'] = abs(peers['AI Rating'] - rating)
+            peers['diff'] = abs(peers[skill_col] - rating)
             top_peers = peers.sort_values('diff').head(3)
-            return ", ".join([f"{r['Player']} ({r['AI Rating']:.1f})" for _, r in top_peers.iterrows()])
+            return ", ".join([f"{r['Player']} ({r[skill_col]:.1f})" for _, r in top_peers.iterrows()])
         
         # Build DataFrame for the current evaluator
         scout_records = []
@@ -685,16 +685,15 @@ with tab5:
             scout_records.append({
                 "Player": p_name,
                 "Role": row['Role'],
-                "AI Bat Rtg": float(row['Bat_Rating']),
-                "AI Bowl Rtg": float(row['Bowl_Rating']),
-                "AI Field Rtg": float(row['Field_Rating']),
+                "Bat Peers (±1.5)": get_skill_peers(p_name, row['Bat_Rating'], 'Bat_Rating'),
+                "Bowl Peers (±1.5)": get_skill_peers(p_name, row['Bowl_Rating'], 'Bowl_Rating'),
+                "Field Peers (±1.5)": get_skill_peers(p_name, row['Field_Rating'], 'Field_Rating'),
                 "AI Total": float(row['AI Rating']),
-                "Closest AI Peers (±1.5)": get_total_peers(p_name, row['AI Rating']),
+                "Avg Scout Score": row['Avg Scout Score'],
                 "My Bat": e_data.get("Bat", None),
                 "My Bowl": e_data.get("Bowl", None),
                 "My Field": e_data.get("Field", None),
                 "My Final Score": e_data.get("Final", None),
-                "Avg Scout Score": row['Avg Scout Score'],
                 "Master Override": scout_overrides.get(p_name, None)
             })
             
@@ -703,11 +702,10 @@ with tab5:
         s_config = {
             "Player": st.column_config.Column(disabled=True),
             "Role": st.column_config.Column(disabled=True),
-            "AI Bat Rtg": st.column_config.NumberColumn(disabled=True, format="%.1f"),
-            "AI Bowl Rtg": st.column_config.NumberColumn(disabled=True, format="%.1f"),
-            "AI Field Rtg": st.column_config.NumberColumn(disabled=True, format="%.1f"),
+            "Bat Peers (±1.5)": st.column_config.TextColumn(disabled=True),
+            "Bowl Peers (±1.5)": st.column_config.TextColumn(disabled=True),
+            "Field Peers (±1.5)": st.column_config.TextColumn(disabled=True),
             "AI Total": st.column_config.NumberColumn(disabled=True, format="%.1f"),
-            "Closest AI Peers (±1.5)": st.column_config.TextColumn(disabled=True),
             "Avg Scout Score": st.column_config.NumberColumn(disabled=True, format="%.1f"),
             "My Bat": st.column_config.NumberColumn("My Bat", min_value=10.0, max_value=30.0, step=0.1),
             "My Bowl": st.column_config.NumberColumn("My Bowl", min_value=10.0, max_value=30.0, step=0.1),
