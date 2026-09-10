@@ -7,6 +7,15 @@ import re
 import urllib.parse
 import plotly.graph_objects as go
 import plotly.express as px
+from streamlit_gsheets import GSheetsConnection
+
+# Temporary connection test
+try:
+    conn = st.connection("gsheets", type=GSheetsConnection)
+    test_df = conn.read(spreadsheet="https://docs.google.com/spreadsheets/d/16j0UEOr_DN-kDNjyFt65IxJxnuEWjyto4o_4ShA4SN0/edit")
+    st.success("✅ Service Account Connection Successful!")
+except Exception as e:
+    st.error(f"❌ Connection Failed: {e}")
 
 st.set_page_config(page_title="BPL Cricket", layout="wide", page_icon="🏏")
 
