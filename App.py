@@ -9,14 +9,6 @@ import plotly.graph_objects as go
 import plotly.express as px
 from streamlit_gsheets import GSheetsConnection
 
-# Temporary connection test
-try:
-    conn = st.connection("gsheets", type=GSheetsConnection)
-    test_df = conn.read(spreadsheet="https://docs.google.com/spreadsheets/d/16j0UEOr_DN-kDNjyFt65IxJxnuEWjyto4o_4ShA4SN0/edit")
-    st.success("✅ Service Account Connection Successful!")
-except Exception as e:
-    st.error(f"❌ Connection Failed: {e}")
-
 st.set_page_config(page_title="BPL Cricket", layout="wide", page_icon="🏏")
 
 # --- FILE PATHS & SECRETS ---
@@ -85,6 +77,15 @@ def update_cap_settings():
         cw["team_budget"] = st.session_state.cap_budget
         save_json(WEIGHTS_FILE, cw)
 
+def extract_name(val):
+    v_str = str(val).strip()
+    if not v_str or pd.isna(val) or v_str == "None" or v_str == "--- CLEAR PICK ---": 
+        return ""
+    v_str = v_str.replace("🔒 ", "").replace("🔒", "")
+    if " (" in v_str and v_str.endswith(")"):
+        return v_str.rsplit(" (", 1)[0].strip()
+    return v_str.strip()
+
 # --- LOAD STATES ---
 saved_mapping = load_json(MAPPING_FILE, {})
 mapping_changed = False
@@ -112,27 +113,21 @@ st.title("🏏 BPL Cricket")
 st.markdown("Advanced AI Rating, Live Roster Management, and Committee Ratings.")
 
 # --- DATA PROCESSING ENGINE ---
-@st.cache_data(show_spinner="Syncing Raw Live Roster from Google Forms...", ttl=60)
+@st.cache_data(show_spinner="Syncing Secure Live Roster from Google Forms...", ttl=60)
 def get_raw_live_roster(url, col_name):
     if not url or not col_name: return []
     try:
-        sheet_id_match = re.search(r'/spreadsheets/d/([a-zA-Z0-9-_]+)', url)
-        if not sheet_id_match:
-            return []
-        spreadsheet_id = sheet_id_match.group(1)
+        # Secure connection using st.connection and the service account keys
+        conn = st.connection("gsheets", type=GSheetsConnection)
+        df = conn.read(spreadsheet=url)
         
-        gid_match = re.search(r'[#&?]gid=([0-9]+)', url)
-        gid = gid_match.group(1) if gid_match else "0"
-        
-        csv_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export?format=csv&gid={gid}"
-        df = pd.read_csv(csv_url)
-        
-        match_col = next((c for c in df.columns if c.strip().lower() == col_name.strip().lower()), None)
+        match_col = next((c for c in df.columns if str(c).strip().lower() == col_name.strip().lower()), None)
         if match_col:
             names = df[match_col].dropna().astype(str).apply(clean_prefix)
             return sorted([n.strip() for n in names if n.strip()])
         return []
-    except Exception:
+    except Exception as e:
+        st.error(f"⚠️ Could not sync roster securely: {e}")
         return []
 
 @st.cache_data(show_spinner="Reading Excel File (Only happens once)...")
