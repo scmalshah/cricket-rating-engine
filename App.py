@@ -87,7 +87,6 @@ def get_raw_excel_data(file_mod_time):
             if 'bat' in s.lower(): bat_dfs.append(df)
             elif 'bowl' in s.lower(): bowl_dfs.append(df)
             
-            # Look for fielding data across any sheet
             f_cols = [c for c in df.columns if any(x in c.lower() for x in ['catch', 'run out', 'stump', 'fielding'])]
             if f_cols:
                 f_df = df[['Player'] + f_cols].copy()
@@ -131,11 +130,9 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping):
     else:
         agg_field = pd.DataFrame(columns=['Player', 'Total_Fielding'])
 
-    # Merge Disciplines
     valid = pd.merge(agg_bat, agg_bowl, on='Player', how='outer')
     valid = pd.merge(valid, agg_field, on='Player', how='outer').fillna(0)
     
-    # Filter valid players
     valid = valid[(valid['Balls_Faced'] >= 12) | (valid['Balls_Bowled'] >= 18)].copy()
     if valid.empty: return pd.DataFrame()
 
@@ -144,29 +141,41 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping):
     valid['Econ'] = np.where(valid['Balls_Bowled'] > 0, (valid['Runs_bowl'] / valid['Balls_Bowled']) * 6, 999)
     valid['Bat Avg'] = np.where(valid['Dismissals'] > 0, valid['Runs_bat'] / valid['Dismissals'], valid['Runs_bat'])
     valid['Bowl Avg'] = np.where(valid['Wkts'] > 0, valid['Runs_bowl'] / valid['Wkts'], 0)
+    valid['Bowl SR'] = np.where(valid['Wkts'] > 0, valid['Balls_Bowled'] / valid['Wkts'], valid['Balls_Bowled'])
+    valid['Bat BPD'] = np.where(valid['Dismissals'] > 0, valid['Balls_Faced'] / valid['Dismissals'], valid['Balls_Faced'])
     valid['Overs'] = valid['Balls_Bowled'].apply(format_overs)
 
     # Bayesian Smoothing
     mean_avg = valid['Runs_bat'].sum() / (valid['Dismissals'].sum() or 1)
+    mean_bpd = valid['Balls_Faced'].sum() / (valid['Dismissals'].sum() or 1)
+    mean_bowl_sr = valid['Balls_Bowled'].sum() / (valid['Wkts'].sum() or 1)
+
     valid['Sm_Avg'] = (valid['Runs_bat'] + (mean_avg * 3)) / (valid['Dismissals'] + 3)
     valid['Sm_SR'] = ((valid['Runs_bat'] + ((valid['Runs_bat'].sum() / (valid['Balls_Faced'].sum() or 1) * 100) / 100 * 30)) / (valid['Balls_Faced'] + 30)) * 100
+    valid['Sm_BPD'] = (valid['Balls_Faced'] + (mean_bpd * 3)) / (valid['Dismissals'] + 3)
+    
     valid['Sm_Econ'] = ((valid['Runs_bowl'] + ((valid['Runs_bowl'].sum() / (valid['Balls_Bowled'].sum() or 1) * 6) / 6 * 30)) / (valid['Balls_Bowled'] + 30)) * 6
     valid['Sm_Avg_bowl'] = (valid['Runs_bowl'] + ((valid['Runs_bowl'].sum() / (valid['Balls_Bowled'].sum() or 1) * 6) * 5)) / (valid['Wkts'] + 5)
+    valid['Sm_Bowl_SR'] = (valid['Balls_Bowled'] + (mean_bowl_sr * 5)) / (valid['Wkts'] + 5)
 
     # Z-Scores
     z_runs = (valid['Runs_bat'] - valid['Runs_bat'].mean()) / (valid['Runs_bat'].std() or 1)
     z_avg = (valid['Sm_Avg'] - valid['Sm_Avg'].mean()) / (valid['Sm_Avg'].std() or 1)
     z_sr = (valid['Sm_SR'] - valid['Sm_SR'].mean()) / (valid['Sm_SR'].std() or 1)
-    valid['Bat_Score'] = z_runs * 0.3 + z_avg * 0.4 + z_sr * 0.3
-
+    z_bpd = (valid['Sm_BPD'] - valid['Sm_BPD'].mean()) / (valid['Sm_BPD'].std() or 1)
+    
     z_wkts = (valid['Wkts'] - valid['Wkts'].mean()) / (valid['Wkts'].std() or 1)
     z_econ = (valid['Sm_Econ'].mean() - valid['Sm_Econ']) / (valid['Sm_Econ'].std() or 1)
     z_avg_bowl = (valid['Sm_Avg_bowl'].mean() - valid['Sm_Avg_bowl']) / (valid['Sm_Avg_bowl'].std() or 1)
-    valid['Bowl_Score'] = z_wkts * 0.4 + z_econ * 0.35 + z_avg_bowl * 0.25
+    z_bowl_sr = (valid['Sm_Bowl_SR'].mean() - valid['Sm_Bowl_SR']) / (valid['Sm_Bowl_SR'].std() or 1) # Reversed
     
     valid['Fielding_Score'] = (valid['Total_Fielding'] - valid['Total_Fielding'].mean()) / (valid['Total_Fielding'].std() or 1)
 
-    # Role & Final Logic (with Fielding Weights)
+    # Calculate Individual Discipline Scores with New Weights
+    valid['Bat_Score'] = (z_runs * 0.25) + (z_avg * 0.35) + (z_sr * 0.25) + (z_bpd * 0.15)
+    valid['Bowl_Score'] = (z_wkts * 0.30) + (z_econ * 0.30) + (z_avg_bowl * 0.20) + (z_bowl_sr * 0.20)
+
+    # Role & Final Logic
     valid['Role'] = valid.apply(lambda r: 'All-Rounder' if r['Balls_Faced'] >= 15 and r['Balls_Bowled'] >= 18 else ('Bowler' if r['Balls_Bowled'] >= 18 else 'Batter'), axis=1)
     
     def calc_final(r):
@@ -176,12 +185,15 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping):
         
     valid['Final_Raw'] = valid.apply(calc_final, axis=1)
 
-    min_raw, max_raw = np.percentile(valid['Final_Raw'], 1), np.percentile(valid['Final_Raw'], 99)
-    if max_raw == min_raw: max_raw = min_raw + 1 
+    # --- T-SCORE DISTRIBUTION (Solves the Clumping) ---
+    mean_raw = valid['Final_Raw'].mean()
+    std_raw = valid['Final_Raw'].std() or 1
     
-    valid['AI Rating'] = ((valid['Final_Raw'] - min_raw) / (max_raw - min_raw)) * 20.0 + 10.0
+    # Centers the league exactly at 20.0. 3.33 standard deviations creates a natural spread from 10 to 30.
+    valid['AI Rating'] = 20.0 + ((valid['Final_Raw'] - mean_raw) / std_raw) * 3.33
     valid['AI Rating'] = valid['AI Rating'].clip(lower=10.0, upper=30.0).round(1)
-    valid['Tier'] = pd.cut(valid['AI Rating'], bins=[0, 18, 23, 27, 31], labels=["Bronze", "Silver", "Gold", "Platinum"])
+    
+    valid['Tier'] = pd.cut(valid['AI Rating'], bins=[0, 16.9, 22.9, 26.9, 31], labels=["Bronze", "Silver", "Gold", "Platinum"])
     
     return valid
 
@@ -224,8 +236,8 @@ with tab1:
         elif status_f != "All Players": disp_df = disp_df[disp_df['Draft Status'] == status_f]
 
         # Formatting Output Columns
-        disp_df = disp_df[['Player', 'Role', 'Tier', 'Runs_bat', 'Bat Avg', 'Wkts', 'Bowl Avg', 'Econ', 'Total_Fielding', 'AI Rating', 'Avg Scout Score', 'Draft Status']].sort_values('AI Rating', ascending=False)
-        disp_df.columns = ['Player', 'Role', 'Tier', 'Runs', 'Bat Avg', 'Wkts', 'Bowl Avg', 'Econ', 'Fielding', 'AI Rating', 'Scout Rating', 'Draft Status']
+        disp_df = disp_df[['Player', 'Role', 'Tier', 'Runs_bat', 'Bat Avg', 'SR_bat', 'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 'Total_Fielding', 'AI Rating', 'Avg Scout Score', 'Draft Status']].sort_values('AI Rating', ascending=False)
+        disp_df.columns = ['Player', 'Role', 'Tier', 'Runs', 'Bat Avg', 'Bat SR', 'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 'Fielding', 'AI Rating', 'Scout Rating', 'Draft Status']
         
         styled_df = disp_df.style.background_gradient(subset=['AI Rating'], cmap='RdYlGn', vmin=10, vmax=30)\
             .format({
@@ -233,7 +245,9 @@ with tab1:
                 'Wkts': '{:.0f}',
                 'Fielding': '{:.0f}',
                 'Bat Avg': '{:.2f}',
+                'Bat SR': '{:.1f}',
                 'Bowl Avg': '{:.2f}',
+                'Bowl SR': '{:.1f}',
                 'Econ': '{:.2f}',
                 'AI Rating': '{:.1f}',
                 'Scout Rating': '{:.1f}'
@@ -283,8 +297,8 @@ with tab3:
                 st.markdown(f"**AI Rating:** {p_data['AI Rating']:.1f}/30.0")
                 st.markdown(f"**Drafted To:** {p_data['Draft Status']}")
                 st.markdown("---")
-                st.markdown(f"**Total Runs:** {int(p_data['Runs_bat'])} *(Avg: {p_data['Bat Avg']:.2f}, SR: {p_data['SR_bat']:.1f})*")
-                st.markdown(f"**Total Wkts:** {int(p_data['Wkts'])} *(Avg: {p_data['Bowl Avg']:.2f}, Econ: {p_data['Econ']:.2f}, Overs: {p_data['Overs']})*")
+                st.markdown(f"**Total Runs:** {int(p_data['Runs_bat'])} *(Avg: {p_data['Bat Avg']:.2f}, SR: {p_data['SR_bat']:.1f}, Balls/Dismissal: {p_data['Bat BPD']:.1f})*")
+                st.markdown(f"**Total Wkts:** {int(p_data['Wkts'])} *(Avg: {p_data['Bowl Avg']:.2f}, SR: {p_data['Bowl SR']:.1f}, Econ: {p_data['Econ']:.2f})*")
                 st.markdown(f"**Fielding Dismissals:** {int(p_data['Total_Fielding'])}")
                 
                 st.markdown("---")
@@ -337,67 +351,29 @@ with tab5:
     st.subheader("🧠 How the AI Rating is Calculated")
     
     st.markdown("""
-    To ensure fair valuations for the draft, the BPL Engine uses a robust **Z-Score Normalization** model mapped to a **10.0 – 30.0 scale**. The engine automatically parses batting, bowling, and fielding metrics across all uploaded sheets.
+    To create maximum separation between players and ensure a fair draft, the BPL Engine parses Batting, Bowling, and Fielding metrics, standardizes them, and forces them into a Bell-Curve distribution.
 
-    ### 1. The Core Metrics
-    * **Batting Score:** Calculated using Total Runs (30%), Batting Average (40%), and Strike Rate (30%).
-    * **Bowling Score:** Calculated using Total Wickets (40%), Economy Rate (35%), and Bowling Average (25%).
-    * **Fielding Score:** The engine sums all Catches, Run-Outs, and Stumpings a player is involved in across all scorecards.
+    ### 1. Expanded Core Metrics
+    The engine now calculates **6 granular data points** to separate players:
+    *   **Batting Score:** Total Runs (25%), Batting Avg (35%), Strike Rate (25%), and **Balls Per Dismissal (15%)**. *(BPD rewards top-order anchors who protect against batting collapses).*
+    *   **Bowling Score:** Total Wickets (30%), Economy Rate (30%), Bowling Avg (20%), and **Bowling Strike Rate (20%)**. *(Bowl SR tracks balls per wicket, mathematically rewarding aggressive partnership-breakers).*
+    *   **Fielding Score:** The sum of all Catches, Run-Outs, and Stumpings.
+
+    ### 2. Bayesian Smoothing & Z-Scores
+    To prevent a bowler who took 1 wicket for 2 runs (Economy 2.00) from breaking the algorithm, the engine injects "fictitious" league average stats into every player's record. 
     
-    ### 2. Bayesian Smoothing (The "Reality Check")
-    If a player scores 12 runs off 2 balls and never gets out, their Strike Rate is technically 600.0 and their Average is Infinity. If a bowler bowls 1 over and takes 1 wicket for 2 runs, their Economy is 2.00. 
+    The engine then converts every metric into a **Z-Score** to measure exactly how many standard deviations a player is above or below the league average.
+
+    ### 3. Weights & The All-Rounder Premium
+    Players are assigned a role based on strict minimum thresholds:
+    * **Batter (Faced 15+ balls):** Batting Score (85%) + Fielding (15%)
+    * **Bowler (Bowled 18+ balls):** Bowling Score (85%) + Fielding (15%)
+    * **All-Rounder:** `[(Batting * 42.5%) + (Bowling * 42.5%) + (Fielding * 15%)] * 1.3 Multiplier`
     
-    To prevent these tiny sample sizes from breaking the ratings, the engine injects "fictitious" baseline stats (the league average) into every single player's batting and bowling records. This gently pulls outliers back down to reality, while rewarding players who maintain excellent stats over a *large volume* of matches.
+    ### 4. T-Score Distribution (Solving the Clumping)
+    Instead of a simple Min-Max scale that squishes everyone into a narrow band, the engine uses a **Standard Normal Distribution (T-Score)**. 
     
-    ### 3. Z-Scores (Comparing to the League)
-    Instead of using raw numbers, the engine converts every smoothed stat into a **Z-Score**. A Z-Score measures exactly how many standard deviations a player is above or below the league average (+1.5 means you are significantly better than the average player, -0.5 means you are slightly below average).
-    
-    ### 4. Weights & Role Designation
-    Players are assigned a role based on strict minimum thresholds. The Final Raw Score is then calculated using precise weights:
-    * **Batter (Faced 15+ balls):** Batting Score (85%) + Fielding Score (15%)
-    * **Bowler (Bowled 18+ balls):** Bowling Score (85%) + Fielding Score (15%)
-    * **All-Rounder (Met BOTH thresholds):** `[(Batting * 42.5%) + (Bowling * 42.5%) + (Fielding * 15%)] * 1.3 Multiplier`
-    
-    *The 1.3x All-Rounder Multiplier reflects the immense tactical value of a player who saves a roster spot by contributing elite skill in both innings.*
-
-    ---
-    ### 📖 Worked Example: Calculating "Player X"
-    Let's look at how the math actually applies to a hypothetical All-Rounder in the BPL.
-
-    Assume the **League Averages** are currently:
-    *   **Batting:** Average = 15.00, Strike Rate = 110.0
-    *   **Bowling:** Economy = 8.50, Average = 20.00
-    *   **Fielding:** Total Dismissals = 1.0 (with a standard deviation of 1.0)
-
-    **Player X's Raw Stats:**
-    *   **Batting:** 120 Runs, 4 Dismissals, 80 Balls Faced (Raw Avg: 30.00, Raw SR: 150.0)
-    *   **Bowling:** 8 Wickets, 16 Overs (96 balls), 112 Runs Given (Raw Econ: 7.00, Raw Avg: 14.00)
-    *   **Fielding:** 3 Catches
-
-    **Step 1: Smoothing**
-    The engine adds the league average to Player X's stats.
-    *   *Smoothed Batting Avg* drops slightly from 30.00 down to **~23.50**.
-    *   *Smoothed Economy* rises slightly from 7.00 up to **~7.35**.
-
-    **Step 2: Z-Score Math**
-    The engine calculates how Player X compares to the rest of the league:
-    *   *Z_Runs:* +1.50, *Z_Bat_Avg:* +1.20, *Z_SR:* +1.80
-    *   **Batting Score** = `(1.50 * 0.3) + (1.20 * 0.4) + (1.80 * 0.3)` = **+1.47**
-
-    *   *Z_Wkts:* +1.40, *Z_Econ:* +1.10 (Reversed), *Z_Bowl_Avg:* +1.30 (Reversed)
-    *   **Bowling Score** = `(1.40 * 0.4) + (1.10 * 0.35) + (1.30 * 0.25)` = **+1.27**
-
-    *   *Z_Fielding:* +2.00 (Since 3 catches is 2 standard deviations above the league average of 1)
-    *   **Fielding Score** = **+2.00**
-
-    **Step 3: Weighting & The All-Rounder Multiplier**
-    Because Player X faced >15 balls AND bowled >18 balls, they qualify for the 42.5/42.5/15 weight split and the premium multiplier.
-    *   Combined Base = `(1.47 * 0.425) + (1.27 * 0.425) + (2.00 * 0.15)`
-    *   Combined Base = `0.62 + 0.54 + 0.30` = **1.46**
-    *   Final Raw Score = `1.46 * 1.3` = **1.90**
-
-    **Step 4: Mapping to the 10-30 Scale**
-    The engine analyzes the highest and lowest scores across the entire BPL. A Final Raw Score of 1.90 represents massive overall impact. The formula maps this to the visual scale, giving Player X an **AI Rating of 26.8**, placing them firmly in the **Platinum Tier**.
+    The absolute league average player is hardcoded to receive exactly a **20.0 AI Rating**. The algorithm applies a 3.33 standard deviation spread, naturally fanning the players out across the 10.0 to 30.0 range. This creates beautiful separation so you no longer have 15 players tied at 14.1!
     """)
 
 # --- TAB 6: ADMIN & DATA ---
