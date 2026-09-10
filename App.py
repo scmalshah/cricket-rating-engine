@@ -171,7 +171,7 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping):
     
     valid['Fielding_Score'] = (valid['Total_Fielding'] - valid['Total_Fielding'].mean()) / (valid['Total_Fielding'].std() or 1)
 
-    # Calculate Individual Discipline Scores with New Weights
+    # Calculate Individual Discipline Scores
     valid['Bat_Score'] = (z_runs * 0.25) + (z_avg * 0.35) + (z_sr * 0.25) + (z_bpd * 0.15)
     valid['Bowl_Score'] = (z_wkts * 0.30) + (z_econ * 0.30) + (z_avg_bowl * 0.20) + (z_bowl_sr * 0.20)
 
@@ -185,14 +185,14 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping):
         
     valid['Final_Raw'] = valid.apply(calc_final, axis=1)
 
-    # --- T-SCORE DISTRIBUTION (Solves the Clumping) ---
+    # --- T-SCORE DISTRIBUTION ---
     mean_raw = valid['Final_Raw'].mean()
     std_raw = valid['Final_Raw'].std() or 1
     
     valid['AI Rating'] = 20.0 + ((valid['Final_Raw'] - mean_raw) / std_raw) * 3.33
     valid['AI Rating'] = valid['AI Rating'].clip(lower=10.0, upper=30.0).round(1)
     
-    # Calculate 10-30 scale for individual skills (for comparison lists)
+    # Calculate 10-30 scale for individual skills
     for col, new_col in [('Bat_Score', 'Bat_Rating'), ('Bowl_Score', 'Bowl_Rating'), ('Fielding_Score', 'Field_Rating')]:
         mean_val = valid[col].mean()
         std_val = valid[col].std() or 1
@@ -247,9 +247,9 @@ with tab1:
         if status_f == "Available Only": disp_df = disp_df[disp_df['Draft Status'] == "Available"]
         elif status_f != "All Players": disp_df = disp_df[disp_df['Draft Status'] == status_f]
 
-        # Formatting Output Columns
-        disp_df = disp_df[['Player', 'Role', 'Tier', 'Runs_bat', 'Bat Avg', 'SR_bat', 'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 'Total_Fielding', 'AI Rating', 'Avg Scout Score', 'Draft Status']].sort_values('AI Rating', ascending=False)
-        disp_df.columns = ['Player', 'Role', 'Tier', 'Runs', 'Bat Avg', 'Bat SR', 'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 'Fielding', 'AI Rating', 'Scout Rating', 'Draft Status']
+        # Formatting Output Columns - NOW INCLUDES INDIVIDUAL RATINGS
+        disp_df = disp_df[['Player', 'Role', 'Tier', 'Runs_bat', 'Bat Avg', 'SR_bat', 'Bat_Rating', 'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 'Bowl_Rating', 'Total_Fielding', 'Field_Rating', 'AI Rating', 'Avg Scout Score', 'Draft Status']].sort_values('AI Rating', ascending=False)
+        disp_df.columns = ['Player', 'Role', 'Tier', 'Runs', 'Bat Avg', 'Bat SR', 'Bat Rtg', 'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 'Bowl Rtg', 'Fielding', 'Field Rtg', 'AI Rating', 'Scout Rating', 'Draft Status']
         
         styled_df = disp_df.style.background_gradient(subset=['AI Rating'], cmap='RdYlGn', vmin=10, vmax=30)\
             .format({
@@ -258,9 +258,12 @@ with tab1:
                 'Fielding': '{:.0f}',
                 'Bat Avg': '{:.2f}',
                 'Bat SR': '{:.1f}',
+                'Bat Rtg': '{:.1f}',
                 'Bowl Avg': '{:.2f}',
                 'Bowl SR': '{:.1f}',
                 'Econ': '{:.2f}',
+                'Bowl Rtg': '{:.1f}',
+                'Field Rtg': '{:.1f}',
                 'AI Rating': '{:.1f}',
                 'Scout Rating': '{:.1f}'
             }, na_rep="-")
@@ -509,7 +512,7 @@ with tab6:
 
         st.markdown("---")
         st.markdown("### 5. 💾 Permanent Cloud Backup & Restore")
-        st.write("Because free servers reset when code changes, download your server state to save your mappings and draft rosters permanently.")
+        st.write("Because free servers reset when code changes, download your server state to save your mappings and rosters permanently.")
         
         bc1, bc2 = st.columns(2)
         with bc1:
