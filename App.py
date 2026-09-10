@@ -33,35 +33,51 @@ def overs_to_balls(overs):
     except:
         return 0
 
+def load_saved_mappings():
+    if os.path.exists(MAPPING_FILE):
+        try:
+            with open(MAPPING_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_mappings_to_disk(mapping_dict):
+    with open(MAPPING_FILE, "w") as f:
+        json.dump(mapping_dict, f, indent=2)
+
 # --- APP HEADER ---
 st.title("🏏 Proprietary Player Rating Engine")
-st.markdown("Community Draft Board & Rating System. Uploaded files and alias merges are synchronized for everyone.")
+st.markdown("Global Draft Board & Rating System. Uploaded stats and player mappings persist permanently across sessions.")
 
 # --- SIDEBAR: ADMIN DATA CONTROLS ---
 with st.sidebar:
-    st.header("⚙️ Admin & Data Upload")
-    uploaded_file = st.file_uploader("Upload New Excel File (.xlsx)", type=["xlsx"])
+    st.header("⚙️ Admin Controls")
+    uploaded_file = st.file_uploader("Upload / Replace Excel Stats (.xlsx)", type=["xlsx"])
     
     if uploaded_file is not None:
-        # Save file to disk so all users share it
         with open(DATA_FILE, "wb") as f:
             f.write(uploaded_file.getbuffer())
-        st.success("✅ New dataset uploaded and saved for all users!")
-        # Clear existing mapping when a new dataset is supplied
-        if os.path.exists(MAPPING_FILE):
-            os.remove(MAPPING_FILE)
+        st.success("✅ New Excel stats uploaded! (Your saved name mappings remain intact)")
         st.rerun()
 
-    if os.path.exists(DATA_FILE):
-        if st.button("🗑️ Reset / Clear Stored Dataset"):
-            if os.path.exists(DATA_FILE): os.remove(DATA_FILE)
-            if os.path.exists(MAPPING_FILE): os.remove(MAPPING_FILE)
-            st.warning("Dataset cleared.")
+    st.markdown("---")
+    st.subheader("Data Reset")
+    if st.button("🗑️ Clear Uploaded Stats File"):
+        if os.path.exists(DATA_FILE):
+            os.remove(DATA_FILE)
+            st.warning("Stats file removed.")
+            st.rerun()
+            
+    if st.button("⚠️ Reset All Name Mappings"):
+        if os.path.exists(MAPPING_FILE):
+            os.remove(MAPPING_FILE)
+            st.warning("All saved alias mappings have been deleted.")
             st.rerun()
 
 # --- CHECK DATASET AVAILABILITY ---
 if not os.path.exists(DATA_FILE):
-    st.info("👋 No dataset is currently loaded. An admin or evaluator must upload an Excel file via the sidebar to initialize the rankings.")
+    st.info("👋 No stats file currently found on the server. Please upload an Excel file via the sidebar to generate rankings.")
     st.stop()
 
 # --- LOAD DATASET FROM DISK ---
@@ -89,44 +105,46 @@ for s in bowl_sheets:
 raw_bat = pd.concat(bat_dfs, ignore_index=True) if bat_dfs else pd.DataFrame()
 raw_bowl = pd.concat(bowl_dfs, ignore_index=True) if bowl_dfs else pd.DataFrame()
 
-all_names = set()
-if not raw_bat.empty: all_names.update(raw_bat['Player'].dropna().unique())
-if not raw_bowl.empty: all_names.update(raw_bowl['Player'].dropna().unique())
+# Collect all current unique names in the dataset
+current_names = set()
+if not raw_bat.empty: current_names.update(raw_bat['Player'].dropna().unique())
+if not raw_bowl.empty: current_names.update(raw_bowl['Player'].dropna().unique())
 
-# Load existing saved mapping if available
-saved_mapping = {}
-if os.path.exists(MAPPING_FILE):
-    try:
-        with open(MAPPING_FILE, "r") as f:
-            saved_mapping = json.load(f)
-    except:
-        saved_mapping = {}
+# Load persistent mappings from disk
+saved_mapping = load_saved_mappings()
+
+# Update mapping dict: preserve existing mappings, default new names to themselves
+updated_mapping_records = []
+for name in sorted(list(current_names)):
+    merged_name = saved_mapping.get(name, name)
+    updated_mapping_records.append({
+        "Original Name": name,
+        "Merged Name": merged_name
+    })
+
+mapping_df = pd.DataFrame(updated_mapping_records)
 
 # --- SECTION 1: NAME MERGING & MAPPING ---
-with st.expander("🛠️ Player Name Aliases & Merge Tool (Click to Expand)", expanded=not bool(saved_mapping)):
-    st.write("Edit the **'Merged Name'** column to merge player records across different scorecards. Changes save globally.")
+with st.expander("🛠️ Player Name Aliases & Merge Tool (Saved Permanently)", expanded=False):
+    st.write("Edit the **'Merged Name'** column to merge aliases. These persist across all Excel uploads until manually reset.")
     
-    mapping_df = pd.DataFrame({
-        "Original Name": sorted(list(all_names)),
-        "Merged Name": [saved_mapping.get(n, n) for n in sorted(list(all_names))]
-    })
+    edited_mapping = st.data_editor(mapping_df, use_container_width=True, hide_index=True, key="mapping_editor")
     
-    edited_mapping = st.data_editor(mapping_df, use_container_width=True, hide_index=True)
-    
-    if st.button("💾 Save Player Mappings for All Users", type="secondary"):
-        name_map = dict(zip(edited_mapping["Original Name"], edited_mapping["Merged Name"]))
-        with open(MAPPING_FILE, "w") as f:
-            json.dump(name_map, f)
-        st.success("Player mappings saved globally!")
+    if st.button("💾 Save Player Mappings Permanently", type="primary"):
+        new_map = dict(zip(edited_mapping["Original Name"], edited_mapping["Merged Name"]))
+        # Update our persistent dictionary and write to disk
+        saved_mapping.update(new_map)
+        save_mappings_to_disk(saved_mapping)
+        st.success("✅ Mappings saved permanently!")
         st.rerun()
 
-# Apply the current or saved mapping
-name_map = dict(zip(edited_mapping["Original Name"], edited_mapping["Merged Name"]))
+# Apply the persistent name mappings
+active_map = dict(zip(edited_mapping["Original Name"], edited_mapping["Merged Name"]))
+
+if not raw_bat.empty: raw_bat['Player'] = raw_bat['Player'].map(active_map).fillna(raw_bat['Player'])
+if not raw_bowl.empty: raw_bowl['Player'] = raw_bowl['Player'].map(active_map).fillna(raw_bowl['Player'])
 
 # --- SECTION 2: CALCULATION ENGINE ---
-if not raw_bat.empty: raw_bat['Player'] = raw_bat['Player'].map(name_map).fillna(raw_bat['Player'])
-if not raw_bowl.empty: raw_bowl['Player'] = raw_bowl['Player'].map(name_map).fillna(raw_bowl['Player'])
-
 # Aggregate Batting
 for col in ['Runs', 'SR', 'Inns', 'NO']:
     raw_bat[col] = pd.to_numeric(raw_bat[col], errors='coerce').fillna(0)
@@ -146,7 +164,7 @@ agg_bowl = raw_bowl.groupby('Player').agg(
     Balls_Bowled=('Balls_Bowled', 'sum'), Runs_bowl=('Runs', 'sum'), Wkts=('Wkts', 'sum')
 ).reset_index()
 
-# Combine Disciplines
+# Merge Disciplines
 final_df = pd.merge(agg_bat, agg_bowl, on='Player', how='outer').fillna(0)
 valid = final_df[(final_df['Balls_Faced'] >= 12) | (final_df['Balls_Bowled'] >= 18)].copy()
 
@@ -174,7 +192,7 @@ z_econ = (valid['Sm_Econ'].mean() - valid['Sm_Econ']) / valid['Sm_Econ'].std()
 z_avg_bowl = (valid['Sm_Avg_bowl'].mean() - valid['Sm_Avg_bowl']) / valid['Sm_Avg_bowl'].std()
 valid['Bowl_Score'] = z_wkts * 0.4 + z_econ * 0.35 + z_avg_bowl * 0.25
 
-# Role-Based Scoring
+# Role Assignment
 def assign_role(row):
     if row['Balls_Faced'] >= 15 and row['Balls_Bowled'] >= 18: return 'All-Rounder'
     elif row['Balls_Bowled'] >= 18: return 'Bowler'
@@ -189,7 +207,7 @@ def calc_final(row):
 
 valid['Final_Raw'] = valid.apply(calc_final, axis=1)
 
-# Normalization across the 10.0 to 30.0 boundary
+# Continuous 10.0 to 30.0 boundary mapping
 min_raw, max_raw = np.percentile(valid['Final_Raw'], 1), np.percentile(valid['Final_Raw'], 99)
 valid['Rating'] = ((valid['Final_Raw'] - min_raw) / (max_raw - min_raw)) * 20.0 + 10.0
 valid['Rating'] = valid['Rating'].clip(lower=10.0, upper=30.0).round(1)
@@ -204,7 +222,7 @@ valid['Key Stats'] = valid.apply(format_stats, axis=1)
 output = valid[['Player', 'Role', 'Key Stats', 'Rating']].sort_values('Rating', ascending=False).reset_index(drop=True)
 output.index = output.index + 1
 
-# --- SECTION 3: LIVE DRAFT BOARD ---
+# --- SECTION 3: DRAFT BOARD ---
 st.header("🏆 Live Draft Board")
 
 col1, col2 = st.columns(2)
@@ -222,4 +240,4 @@ if role_filter != "All":
 st.dataframe(display_df, use_container_width=True)
 
 csv = display_df.to_csv(index=True).encode('utf-8')
-st.download_button(label="📥 Download Draft Board (CSV)", data=csv, file_name='live_cricket_ratings.csv', mime='text/csv')
+st.download_button(label="📥 Download Draft Board (CSV)", data=csv, file_name='cricket_ratings_live.csv', mime='text/csv')
