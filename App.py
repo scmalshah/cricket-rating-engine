@@ -351,13 +351,9 @@ if not raw_live_df.empty:
     roster_df = raw_live_df.groupby('Player').last().reset_index()[['Player', 'Form_Pool_Status']]
     
     if not excel_master_df.empty:
-        # Indicator flags who is in the Form but missing from Excel
-        master_df = pd.merge(roster_df, excel_master_df, on="Player", how="left", indicator=True)
-        master_df['Data Source'] = np.where(master_df['_merge'] == 'left_only', 'Form Only (Rookie)', 'Form & Excel')
-        master_df = master_df.drop(columns=['_merge'])
+        master_df = pd.merge(roster_df, excel_master_df, on="Player", how="left")
     else:
-        master_df = roster_df.copy()
-        master_df['Data Source'] = 'Form Only (Rookie)'
+        master_df = roster_df
         
     master_df['AI Rating'] = master_df['AI Rating'].fillna(20.0)
     if 'Rtg_MinMax' in master_df.columns:
@@ -384,7 +380,6 @@ else:
     master_df = excel_master_df.copy()
     if not master_df.empty:
         master_df['Form_Pool_Status'] = "Team Player"
-        master_df['Data Source'] = 'Excel Only'
 
 if not master_df.empty:
     master_df['Draft Status'] = master_df['Player'].apply(lambda x: draft_state.get(x, "Available"))
@@ -438,21 +433,19 @@ with tab1:
         </div>
         """, unsafe_allow_html=True)
 
-        f1, f2, f3 = st.columns(3)
+        f1, f2 = st.columns(2)
         role_f = f1.selectbox("Filter Role", ["All", "Batter", "Bowler", "All-Rounder"])
         status_f = f2.selectbox("Filter Status", ["Available Only", "All Players"] + [t for t in TEAMS if t != "Available"])
-        source_f = f3.selectbox("Filter Source", ["All", "Form Only (Rookie)", "Form & Excel", "Excel Only"])
         
         disp_df = master_df.copy()
         if role_f != "All": disp_df = disp_df[disp_df['Role'] == role_f]
         if status_f == "Available Only": disp_df = disp_df[disp_df['Draft Status'] == "Available"]
         elif status_f != "All Players": disp_df = disp_df[disp_df['Draft Status'] == status_f]
-        if source_f != "All": disp_df = disp_df[disp_df['Data Source'] == source_f]
 
         disp_df['Player'] = disp_df.apply(lambda r: f"{r['Player']} (C)" if r['Leadership'] == 'Captain' else (f"{r['Player']} (VC)" if r['Leadership'] == 'Vice Captain' else r['Player']), axis=1)
 
         col_order = [
-            'Player', 'Data Source', 'Role', 'Tier', 'Pool Status',
+            'Player', 'Role', 'Tier', 'Pool Status',
             'Runs_bat', 'Bat Avg', 'SR_bat', 'Boundary_Pct',
             'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 'Extras_Rate',
             'Total_Fielding', 'Bat_Rating', 'Bowl_Rating', 'Field_Rating', 
@@ -462,7 +455,7 @@ with tab1:
         disp_df = disp_df[col_order].sort_values('AI Rating', ascending=False)
         
         new_columns = [
-            'Player', 'Data Source', 'Role', 'Tier', 'Pool Status',
+            'Player', 'Role', 'Tier', 'Pool Status',
             'Runs', 'Bat Avg', 'Bat SR', 'Bound %',
             'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 'Extras/Ov',
             'Fielding', 'Bat Rtg', 'Bowl Rtg', 'Field Rtg', 
@@ -675,7 +668,6 @@ with tab4:
             with pc1:
                 st.markdown(f"### {p_data['Player']} {tag}")
                 st.markdown(f"**Role:** {p_data['Role']} | **Tier:** {p_data['Tier']} | **Status:** {p_data['Pool Status']}")
-                st.markdown(f"**Data Source:** {p_data.get('Data Source', 'Unknown')}")
                 
                 # Show all three distributions side-by-side
                 st.markdown("---")
@@ -817,7 +809,6 @@ with tab5:
             
             scout_records.append({
                 "Player": p_name,
-                "Data Source": row.get('Data Source', 'Unknown'),
                 "Role": row['Role'],
                 "Bat Peers (±1.5)": get_skill_peers(p_name, row['Bat_Rating'], 'Bat_Rating'),
                 "Bowl Peers (±1.5)": get_skill_peers(p_name, row['Bowl_Rating'], 'Bowl_Rating'),
@@ -835,7 +826,6 @@ with tab5:
         
         s_config = {
             "Player": st.column_config.Column(disabled=True),
-            "Data Source": st.column_config.TextColumn(disabled=True),
             "Role": st.column_config.Column(disabled=True),
             "Bat Peers (±1.5)": st.column_config.TextColumn(disabled=True),
             "Bowl Peers (±1.5)": st.column_config.TextColumn(disabled=True),
@@ -853,7 +843,7 @@ with tab5:
             .set_properties(subset=['My Final Score', 'Master Override'], **{'background-color': '#e6f2ff'})
         
         tab5_col_order = [
-            "Player", "Data Source", "Role", "Bat Peers (±1.5)", "Bowl Peers (±1.5)", "Field Peers (±1.5)", 
+            "Player", "Role", "Bat Peers (±1.5)", "Bowl Peers (±1.5)", "Field Peers (±1.5)", 
             "Avg Scout Score", "My Bat", "My Bowl", "My Field", "My Final Score", "AI Total", "Master Override"
         ]
         
