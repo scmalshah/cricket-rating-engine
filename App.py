@@ -159,10 +159,8 @@ def get_raw_excel_data(file_mod_time):
     
     for s in xls.sheet_names:
         s_lower = s.lower()
-        # Bulletproof check: strip all spaces, underscores, and dashes
         s_clean = s_lower.replace(" ", "").replace("_", "").replace("-", "")
         
-        # Tag the source based on the cleaned sheet name
         if 'season8' in s_clean or 's8' in s_clean:
             series_tag = 'Season 8'
         elif 'rjvsnonrj' in s_clean:
@@ -378,13 +376,12 @@ elif series_filter == "Core Series Only":
     if not filtered_bowl.empty: filtered_bowl = filtered_bowl[filtered_bowl['Series_Tag'] == 'Core Series']
     if not filtered_field.empty: filtered_field = filtered_field[filtered_field['Series_Tag'] == 'Core Series']
 
-# --- GOOGLE SHEET LIVE INTEGRATION ---
+# --- GOOGLE SHEET LIVE INTEGRATION & GUARDRAILS ---
 if not raw_live_df.empty:
     raw_live_df['Player'] = raw_live_df['Raw_Name'].map(lambda x: saved_mapping.get(x, x))
     roster_df = raw_live_df.groupby('Player').last().reset_index()[['Player', 'Form_Pool_Status']]
     registered_players = tuple(roster_df['Player'].tolist())
     
-    # Calculate Ratings strictly on registered players using FILTERED data
     excel_master_df = calculate_ratings(filtered_bat, filtered_bowl, filtered_field, saved_mapping, algo_weights, valid_players=registered_players)
     
     if not excel_master_df.empty:
@@ -395,27 +392,6 @@ if not raw_live_df.empty:
         master_df = roster_df.copy()
         master_df['Data Source'] = 'Form Only (Rookie)'
         
-    master_df['AI Rating'] = master_df['AI Rating'].fillna(20.0)
-    if 'Rtg_MinMax' in master_df.columns:
-        master_df['Rtg_MinMax'] = master_df['Rtg_MinMax'].fillna(20.0)
-    else:
-        master_df['Rtg_MinMax'] = 20.0
-    
-    if 'Rtg_Pct' in master_df.columns:
-        master_df['Rtg_Pct'] = master_df['Rtg_Pct'].fillna(20.0)
-    else:
-        master_df['Rtg_Pct'] = 20.0
-        
-    master_df['Bat_Rating'] = master_df['Bat_Rating'].fillna(20.0)
-    master_df['Bowl_Rating'] = master_df['Bowl_Rating'].fillna(20.0)
-    master_df['Field_Rating'] = master_df['Field_Rating'].fillna(20.0)
-    master_df['Role'] = master_df['Role'].fillna('Batter')
-    master_df['Tier'] = pd.cut(master_df['AI Rating'], bins=[0, 16.9, 22.9, 26.9, 31], labels=["Bronze", "Silver", "Gold", "Platinum"])
-    
-    stat_cols = ['Runs_bat', 'Bat Avg', 'SR_bat', 'Boundary_Pct', 'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 'Extras_Rate', 'Total_Fielding']
-    for c in stat_cols:
-        if c not in master_df.columns: master_df[c] = 0
-        master_df[c] = master_df[c].fillna(0)
 else:
     excel_master_df = calculate_ratings(filtered_bat, filtered_bowl, filtered_field, saved_mapping, algo_weights)
     master_df = excel_master_df.copy()
@@ -423,7 +399,27 @@ else:
         master_df['Form_Pool_Status'] = "Team Player"
         master_df['Data Source'] = 'Excel Only'
 
+# --- IMPENETRABLE GUARDRAILS (Ensures UI Never Crashes on Empty Data) ---
 if not master_df.empty:
+    default_rating_cols = ['AI Rating', 'Rtg_MinMax', 'Rtg_Pct', 'Bat_Rating', 'Bowl_Rating', 'Field_Rating']
+    for col in default_rating_cols:
+        if col not in master_df.columns: master_df[col] = 20.0
+        master_df[col] = master_df[col].fillna(20.0)
+        
+    radar_cols = ['Bat_Score', 'Boundary_Score', 'Bowl_Score', 'Fielding_Score']
+    for col in radar_cols:
+        if col not in master_df.columns: master_df[col] = 0.0
+        master_df[col] = master_df[col].fillna(0.0)
+            
+    stat_cols = ['Runs_bat', 'Bat Avg', 'SR_bat', 'Boundary_Pct', 'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 'Extras_Rate', 'Total_Fielding']
+    for c in stat_cols:
+        if c not in master_df.columns: master_df[c] = 0.0
+        master_df[c] = master_df[c].fillna(0.0)
+
+    if 'Role' not in master_df.columns: master_df['Role'] = 'Batter'
+    master_df['Role'] = master_df['Role'].fillna('Batter')
+    master_df['Tier'] = pd.cut(master_df['AI Rating'], bins=[0, 16.9, 22.9, 26.9, 31], labels=["Bronze", "Silver", "Gold", "Platinum"])
+
     master_df['Draft Status'] = master_df['Player'].apply(lambda x: draft_state.get(x, "Available"))
     master_df['Leadership'] = master_df['Player'].apply(lambda x: leadership_state.get(x, "None"))
     
@@ -714,7 +710,6 @@ with tab4:
                 st.markdown(f"**Role:** {p_data['Role']} | **Tier:** {p_data['Tier']} | **Status:** {p_data['Pool Status']}")
                 st.markdown(f"**Data Source:** {p_data.get('Data Source', 'Unknown')}")
                 
-                # Show all three distributions side-by-side
                 st.markdown("---")
                 st.markdown("#### Mathematical Evaluations")
                 st.markdown(f"**AI Rtg (Z-Score):** `{p_data['AI Rating']:.1f}` *(Standard Normal Distribution)*")
@@ -740,18 +735,36 @@ with tab4:
 
             with pc2:
                 categories = ['Batting Volume', 'Strike Rate', 'Boundary Threat', 'Wicket Taking', 'Economy (Reversed)', 'Bowling Discipline', 'Fielding Impact']
-                r_bat = (p_data['Bat_Score'] - master_df['Bat_Score'].min()) / (master_df['Bat_Score'].max() - master_df['Bat_Score'].min() + 0.01)
-                r_sr = (p_data['SR_bat'] - master_df['SR_bat'].min()) / (master_df['SR_bat'].max() - master_df['SR_bat'].min() + 0.01)
-                r_bound = (p_data['Boundary_Score'] - master_df['Boundary_Score'].min()) / (master_df['Boundary_Score'].max() - master_df['Boundary_Score'].min() + 0.01)
                 
-                r_bowl = (p_data['Bowl_Score'] - master_df['Bowl_Score'].min()) / (master_df['Bowl_Score'].max() - master_df['Bowl_Score'].min() + 0.01)
-                r_econ = 1 - ((p_data['Econ'] - master_df['Econ'].min()) / (master_df['Econ'].max() - master_df['Econ'].min() + 0.01))
+                bat_max = master_df['Bat_Score'].max()
+                bat_min = master_df['Bat_Score'].min()
+                r_bat = (p_data['Bat_Score'] - bat_min) / (bat_max - bat_min + 0.01) if bat_max != bat_min else 0.5
+                
+                sr_max = master_df['SR_bat'].max()
+                sr_min = master_df['SR_bat'].min()
+                r_sr = (p_data['SR_bat'] - sr_min) / (sr_max - sr_min + 0.01) if sr_max != sr_min else 0.5
+                
+                bound_max = master_df['Boundary_Score'].max()
+                bound_min = master_df['Boundary_Score'].min()
+                r_bound = (p_data['Boundary_Score'] - bound_min) / (bound_max - bound_min + 0.01) if bound_max != bound_min else 0.5
+                
+                bowl_max = master_df['Bowl_Score'].max()
+                bowl_min = master_df['Bowl_Score'].min()
+                r_bowl = (p_data['Bowl_Score'] - bowl_min) / (bowl_max - bowl_min + 0.01) if bowl_max != bowl_min else 0.5
+                
+                econ_max = master_df['Econ'].max()
+                econ_min = master_df['Econ'].min()
+                r_econ = 1 - ((p_data['Econ'] - econ_min) / (econ_max - econ_min + 0.01)) if econ_max != econ_min else 0.5
                 if p_data['Econ'] == 0 or p_data['Econ'] == 999: r_econ = 0
                 
-                r_disc = 1 - ((p_data['Extras_Rate'] - master_df['Extras_Rate'].min()) / (master_df['Extras_Rate'].max() - master_df['Extras_Rate'].min() + 0.01))
-                if p_data['Extras_Rate'] == 0 and master_df['Extras_Rate'].max() == 0: r_disc = 1
+                ext_max = master_df['Extras_Rate'].max()
+                ext_min = master_df['Extras_Rate'].min()
+                r_disc = 1 - ((p_data['Extras_Rate'] - ext_min) / (ext_max - ext_min + 0.01)) if ext_max != ext_min else 0.5
+                if p_data['Extras_Rate'] == 0 and ext_max == 0: r_disc = 1
                 
-                r_field = (p_data['Fielding_Score'] - master_df['Fielding_Score'].min()) / (master_df['Fielding_Score'].max() - master_df['Fielding_Score'].min() + 0.01)
+                fld_max = master_df['Fielding_Score'].max()
+                fld_min = master_df['Fielding_Score'].min()
+                r_field = (p_data['Fielding_Score'] - fld_min) / (fld_max - fld_min + 0.01) if fld_max != fld_min else 0.5
                 
                 fig = go.Figure()
                 fig.add_trace(go.Scatterpolar(
