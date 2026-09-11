@@ -114,12 +114,14 @@ st.title("🏏 BPL Cricket")
 st.markdown("Advanced AI Rating, Live Roster Management, and Committee Ratings.")
 
 # --- DATA PROCESSING ENGINE ---
-@st.cache_data(show_spinner="Syncing Secure Live Roster from Google Forms...", ttl=0)
+@st.cache_data(show_spinner="Syncing Live Roster from Google Forms...", ttl=300)
 def get_raw_live_roster(url, col_name, pool_col_name):
-    if not url or not col_name: return pd.DataFrame()
+    if not url or not col_name: 
+        return pd.DataFrame()
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
-        df = conn.read(spreadsheet=url, ttl=0)
+        # Use a 5-minute TTL so regular tab switching never triggers Google's 429 limit
+        df = conn.read(spreadsheet=url, ttl=300)
         
         match_col = next((c for c in df.columns if str(c).strip().lower() == col_name.strip().lower()), None)
         match_pool_col = next((c for c in df.columns if pool_col_name and str(c).strip().lower() == pool_col_name.strip().lower()), None)
@@ -139,10 +141,18 @@ def get_raw_live_roster(url, col_name, pool_col_name):
             else:
                 res['Form_Pool_Status'] = "Team Player"
                 
+            st.session_state["last_valid_roster"] = res
             return res
         return pd.DataFrame()
     except Exception as e:
-        st.error(f"⚠️ Could not sync roster securely: {e}")
+        # Prevents app crash on 429: gracefully fall back to last loaded roster
+        if "429" in str(e):
+            st.warning("⚠️ Google Sheets API rate limit reached (429). Displaying cached roster data. Please wait 1 minute before syncing again.")
+        else:
+            st.warning(f"⚠️ Could not refresh live roster: {e}")
+            
+        if "last_valid_roster" in st.session_state:
+            return st.session_state["last_valid_roster"]
         return pd.DataFrame()
 
 @st.cache_data(show_spinner="Reading Excel File (Only happens once)...")
@@ -182,7 +192,7 @@ def get_raw_excel_data(file_mod_time):
     return raw_bat, raw_bowl, raw_field, sorted(list(raw_names))
 
 @st.cache_data(show_spinner="Crunching AI Ratings with Custom Weights...")
-def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w):
+def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w, valid_players=None):
     if raw_bat.empty and raw_bowl.empty: return pd.DataFrame()
     
     rbat, rbowl, rfield = raw_bat.copy(), raw_bowl.copy(), raw_field.copy()
@@ -190,6 +200,13 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w):
     if not rbat.empty: rbat['Player'] = rbat['Player'].map(mapping).fillna(rbat['Player'])
     if not rbowl.empty: rbowl['Player'] = rbowl['Player'].map(mapping).fillna(rbowl['Player'])
     if not rfield.empty: rfield['Player'] = rfield['Player'].map(mapping).fillna(rfield['Player'])
+
+    if valid_players is not None:
+        if not rbat.empty: rbat = rbat[rbat['Player'].isin(valid_players)]
+        if not rbowl.empty: rbowl = rbowl[rbowl['Player'].isin(valid_players)]
+        if not rfield.empty: rfield = rfield[rfield['Player'].isin(valid_players)]
+
+    if rbat.empty and rbowl.empty: return pd.DataFrame()
 
     fours_col = next((c for c in rbat.columns if str(c).lower().strip() in ['4s', 'fours', '4', "4's"]), None)
     sixes_col = next((c for c in rbat.columns if str(c).lower().strip() in ['6s', 'sixes', '6', "6's"]), None)
@@ -232,8 +249,9 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w):
 
     if not rfield.empty:
         for col in rfield.columns:
-            if col != 'Player': rfield[col] = pd.to_numeric(rfield[col], errors='coerce').fillna(0)
-        rfield['Total_Fielding'] = rfield.drop(columns=['Player']).sum(axis=1)
+            if col not in ['Player']: 
+                rfield[col] = pd.to_numeric(rfield[col], errors='coerce').fillna(0)
+        rfield['Total_Fielding'] = rfield.drop(columns=['Player'], errors='ignore').sum(axis=1)
         agg_field = rfield.groupby('Player').agg(Total_Fielding=('Total_Fielding', 'sum')).reset_index()
     else:
         agg_field = pd.DataFrame(columns=['Player', 'Total_Fielding'])
@@ -349,24 +367,29 @@ raw_bat_cache, raw_bowl_cache, raw_field_cache, all_raw_names = get_raw_excel_da
 raw_live_df = get_raw_live_roster(app_config.get("gsheet_url"), app_config.get("gsheet_col"), app_config.get("gsheet_pool_col"))
 raw_live_names = raw_live_df['Raw_Name'].tolist() if not raw_live_df.empty else []
 
-# Calculate Excel Ratings using Mappings
-excel_master_df = calculate_ratings(raw_bat_cache, raw_bowl_cache, raw_field_cache, saved_mapping, algo_weights)
-
-# --- GOOGLE SHEET LIVE INTEGRATION ---
+# --- GOOGLE SHEET LIVE INTEGRATION & MASTER DF BUILD ---
 if not raw_live_df.empty:
     raw_live_df['Player'] = raw_live_df['Raw_Name'].map(lambda x: saved_mapping.get(x, x))
     roster_df = raw_live_df.groupby('Player').last().reset_index()[['Player', 'Form_Pool_Status']]
+    registered_players = tuple(roster_df['Player'].tolist())
+    
+    excel_master_df = calculate_ratings(raw_bat_cache, raw_bowl_cache, raw_field_cache, saved_mapping, algo_weights, valid_players=registered_players)
     
     if not excel_master_df.empty:
-        master_df = pd.merge(roster_df, excel_master_df, on="Player", how="left")
+        master_df = pd.merge(roster_df, excel_master_df, on="Player", how="left", indicator=True)
+        master_df['Data Source'] = np.where(master_df['_merge'] == 'left_only', 'Form Only (Rookie)', 'Form & Excel')
+        master_df = master_df.drop(columns=['_merge'])
     else:
         master_df = roster_df.copy()
+        master_df['Data Source'] = 'Form Only (Rookie)'
 else:
+    excel_master_df = calculate_ratings(raw_bat_cache, raw_bowl_cache, raw_field_cache, saved_mapping, algo_weights)
     master_df = excel_master_df.copy()
     if not master_df.empty:
         master_df['Form_Pool_Status'] = "Team Player"
+        master_df['Data Source'] = 'Excel Only'
 
-# --- BULLETPROOF SCHEMA INITIALIZATION ---
+# --- IMPENETRABLE GUARDRAILS (Guarantees no missing columns or NaN crashes) ---
 if not master_df.empty:
     default_rating_cols = ['AI Rating', 'Rtg_MinMax', 'Rtg_Pct', 'Bat_Rating', 'Bowl_Rating', 'Field_Rating']
     for col in default_rating_cols:
@@ -374,14 +397,14 @@ if not master_df.empty:
             master_df[col] = 0.0
         else:
             master_df[col] = master_df[col].fillna(0.0)
-
+        
     radar_cols = ['Bat_Score', 'Boundary_Score', 'Bowl_Score', 'Fielding_Score']
     for col in radar_cols:
         if col not in master_df.columns:
             master_df[col] = 0.0
         else:
             master_df[col] = master_df[col].fillna(0.0)
-
+            
     stat_cols = ['Runs_bat', 'Bat Avg', 'SR_bat', 'Boundary_Pct', 'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 'Extras_Rate', 'Total_Fielding']
     for c in stat_cols:
         if c not in master_df.columns:
@@ -445,19 +468,21 @@ with tab1:
         </div>
         """, unsafe_allow_html=True)
 
-        f1, f2 = st.columns(2)
+        f1, f2, f3 = st.columns(3)
         role_f = f1.selectbox("Filter Role", ["All", "Batter", "Bowler", "All-Rounder"])
         status_f = f2.selectbox("Filter Status", ["Available Only", "All Players"] + [t for t in TEAMS if t != "Available"])
+        source_f = f3.selectbox("Filter Source", ["All", "Form Only (Rookie)", "Form & Excel", "Excel Only"])
         
         disp_df = master_df.copy()
         if role_f != "All": disp_df = disp_df[disp_df['Role'] == role_f]
         if status_f == "Available Only": disp_df = disp_df[disp_df['Draft Status'] == "Available"]
         elif status_f != "All Players": disp_df = disp_df[disp_df['Draft Status'] == status_f]
+        if source_f != "All": disp_df = disp_df[disp_df['Data Source'] == source_f]
 
         disp_df['Player'] = disp_df.apply(lambda r: f"{r['Player']} (C)" if r['Leadership'] == 'Captain' else (f"{r['Player']} (VC)" if r['Leadership'] == 'Vice Captain' else r['Player']), axis=1)
 
         col_order = [
-            'Player', 'Role', 'Tier', 'Pool Status',
+            'Player', 'Data Source', 'Role', 'Tier', 'Pool Status',
             'Runs_bat', 'Bat Avg', 'SR_bat', 'Boundary_Pct',
             'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 'Extras_Rate',
             'Total_Fielding', 'Bat_Rating', 'Bowl_Rating', 'Field_Rating', 
@@ -467,7 +492,7 @@ with tab1:
         disp_df = disp_df[col_order].sort_values('AI Rating', ascending=False)
         
         new_columns = [
-            'Player', 'Role', 'Tier', 'Pool Status',
+            'Player', 'Data Source', 'Role', 'Tier', 'Pool Status',
             'Runs', 'Bat Avg', 'Bat SR', 'Bound %',
             'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 'Extras/Ov',
             'Fielding', 'Bat Rtg', 'Bowl Rtg', 'Field Rtg', 
@@ -482,7 +507,7 @@ with tab1:
             'Bat Avg': '{:.2f}', 'Bat SR': '{:.1f}', 'Bound %': '{:.1f}%',
             'Bowl Avg': '{:.2f}', 'Bowl SR': '{:.1f}', 'Econ': '{:.2f}', 'Extras/Ov': '{:.2f}',
             'Bat Rtg': '{:.1f}', 'Bowl Rtg': '{:.1f}', 'Field Rtg': '{:.1f}',
-            'AI Rtg (Z-Score)': '{:.1f}', 'AI Rtg (MinMax)': '{:.1f}', 'AI Rtg (Pct)': '{:.1f}',
+            'AI Rtg (Z-Score)': '{:.1f}', 'AI Rtg (MinMax)': '{:.1f}', 'AI Rtg (Pct)': '{:.1f}', 
             'Avg Scout Score': '{:.1f}', 'Scout Override': '{:.1f}', 'Final Scout Rating': '{:.1f}'
         }
         for u in auth_users:
@@ -625,6 +650,12 @@ with tab2:
                     has_error = True
                     break
 
+                if t_rem < (0.0 * (squad_size - t_count)):
+                    min_req = 0.0 * (squad_size - t_count)
+                    st.session_state.draft_error = f"❌ INVALID ROSTER: {t} must save {min_req:.1f} points for remaining slots. Edit reverted."
+                    has_error = True
+                    break
+                    
                 for p in t_players: new_draft_state[p] = t
 
             if has_error:
@@ -674,13 +705,16 @@ with tab4:
             with pc1:
                 st.markdown(f"### {p_data['Player']} {tag}")
                 st.markdown(f"**Role:** {p_data['Role']} | **Tier:** {p_data['Tier']} | **Status:** {p_data['Pool Status']}")
+                st.markdown(f"**Data Source:** {p_data.get('Data Source', 'Unknown')}")
+                
                 st.markdown("---")
                 st.markdown("#### Mathematical Evaluations")
-                st.markdown(f"**AI Rtg (Z-Score):** `{p_data['AI Rating']:.1f}`")
-                st.markdown(f"**AI Rtg (MinMax):** `{p_data.get('Rtg_MinMax', 0.0):.1f}`")
-                st.markdown(f"**AI Rtg (Percentile):** `{p_data.get('Rtg_Pct', 0.0):.1f}`")
-                st.markdown(f"**Final Scout Rating:** `{p_data['Final Scout Rating']:.1f}`")
+                st.markdown(f"**AI Rtg (Z-Score):** `{p_data['AI Rating']:.1f}` *(Standard Normal Distribution)*")
+                st.markdown(f"**AI Rtg (MinMax):** `{p_data.get('Rtg_MinMax', 0.0):.1f}` *(Linear Scale from Best to Worst)*")
+                st.markdown(f"**AI Rtg (Percentile):** `{p_data.get('Rtg_Pct', 0.0):.1f}` *(Uniform Ranking)*")
+                st.markdown(f"**Final Scout Rating:** `{p_data['Final Scout Rating']:.1f}` *(Human Committee)*")
                 st.markdown(f"**Drafted To:** {p_data['Draft Status']}")
+                
                 st.markdown("---")
                 st.markdown(f"**Total Runs:** {int(p_data['Runs_bat'])} *(Avg: {p_data['Bat Avg']:.2f}, SR: {p_data['SR_bat']:.1f}, Bound %: {p_data['Boundary_Pct']:.1f}%)*")
                 st.markdown(f"**Total Wkts:** {int(p_data['Wkts'])} *(Avg: {p_data['Bowl Avg']:.2f}, SR: {p_data['Bowl SR']:.1f}, Econ: {p_data['Econ']:.2f})*")
@@ -699,28 +733,35 @@ with tab4:
             with pc2:
                 categories = ['Batting Volume', 'Strike Rate', 'Boundary Threat', 'Wicket Taking', 'Economy (Reversed)', 'Bowling Discipline', 'Fielding Impact']
                 
-                b_max, b_min = master_df['Bat_Score'].max(), master_df['Bat_Score'].min()
-                r_bat = (p_data['Bat_Score'] - b_min) / (b_max - b_min + 0.01) if b_max != b_min else 0.5
+                bat_max = master_df['Bat_Score'].max()
+                bat_min = master_df['Bat_Score'].min()
+                r_bat = (p_data['Bat_Score'] - bat_min) / (bat_max - bat_min + 0.01) if bat_max != bat_min else 0.5
                 
-                sr_max, sr_min = master_df['SR_bat'].max(), master_df['SR_bat'].min()
+                sr_max = master_df['SR_bat'].max()
+                sr_min = master_df['SR_bat'].min()
                 r_sr = (p_data['SR_bat'] - sr_min) / (sr_max - sr_min + 0.01) if sr_max != sr_min else 0.5
                 
-                bd_max, bd_min = master_df['Boundary_Score'].max(), master_df['Boundary_Score'].min()
-                r_bound = (p_data['Boundary_Score'] - bd_min) / (bd_max - bd_min + 0.01) if bd_max != bd_min else 0.5
+                bound_max = master_df['Boundary_Score'].max()
+                bound_min = master_df['Boundary_Score'].min()
+                r_bound = (p_data['Boundary_Score'] - bound_min) / (bound_max - bound_min + 0.01) if bound_max != bound_min else 0.5
                 
-                bw_max, bw_min = master_df['Bowl_Score'].max(), master_df['Bowl_Score'].min()
-                r_bowl = (p_data['Bowl_Score'] - bw_min) / (bw_max - bw_min + 0.01) if bw_max != bw_min else 0.5
+                bowl_max = master_df['Bowl_Score'].max()
+                bowl_min = master_df['Bowl_Score'].min()
+                r_bowl = (p_data['Bowl_Score'] - bowl_min) / (bowl_max - bowl_min + 0.01) if bowl_max != bowl_min else 0.5
                 
-                ec_max, ec_min = master_df['Econ'].max(), master_df['Econ'].min()
-                r_econ = 1 - ((p_data['Econ'] - ec_min) / (ec_max - ec_min + 0.01)) if ec_max != ec_min else 0.5
+                econ_max = master_df['Econ'].max()
+                econ_min = master_df['Econ'].min()
+                r_econ = 1 - ((p_data['Econ'] - econ_min) / (econ_max - econ_min + 0.01)) if econ_max != econ_min else 0.5
                 if p_data['Econ'] == 0 or p_data['Econ'] == 999: r_econ = 0
                 
-                ex_max, ex_min = master_df['Extras_Rate'].max(), master_df['Extras_Rate'].min()
-                r_disc = 1 - ((p_data['Extras_Rate'] - ex_min) / (ex_max - ex_min + 0.01)) if ex_max != ex_min else 0.5
-                if p_data['Extras_Rate'] == 0 and ex_max == 0: r_disc = 1
+                ext_max = master_df['Extras_Rate'].max()
+                ext_min = master_df['Extras_Rate'].min()
+                r_disc = 1 - ((p_data['Extras_Rate'] - ext_min) / (ext_max - ext_min + 0.01)) if ext_max != ext_min else 0.5
+                if p_data['Extras_Rate'] == 0 and ext_max == 0: r_disc = 1
                 
-                fd_max, fd_min = master_df['Fielding_Score'].max(), master_df['Fielding_Score'].min()
-                r_field = (p_data['Fielding_Score'] - fd_min) / (fd_max - fd_min + 0.01) if fd_max != fd_min else 0.5
+                fld_max = master_df['Fielding_Score'].max()
+                fld_min = master_df['Fielding_Score'].min()
+                r_field = (p_data['Fielding_Score'] - fld_min) / (fld_max - fld_min + 0.01) if fld_max != fld_min else 0.5
                 
                 fig = go.Figure()
                 fig.add_trace(go.Scatterpolar(
@@ -739,6 +780,7 @@ with tab5:
         
         st.markdown("---")
         st.markdown("### 🔍 1. Single Player Deep Dive")
+        st.write("Use this tool to evaluate specific player skills interactively.")
         
         sc1, sc2 = st.columns(2)
         scout_player = sc1.selectbox("Select Player to Rate", master_df.sort_values('Player')['Player'])
@@ -804,6 +846,8 @@ with tab5:
 
         st.markdown("---")
         st.markdown("### 📋 2. Mass Ratings & Overrides Table")
+        st.write("Edit final scores directly in the table. The **Peer** columns display the closest matching players (±1.5 pts) for Batting, Bowling, and Fielding respectively.")
+        st.caption("*(Note: To prevent errors, 'My Final Score' visually updates immediately after you click Save Data.)*")
         
         def get_skill_peers(player_name, rating, skill_col):
             min_v, max_v = rating - 1.5, rating + 1.5
@@ -820,6 +864,7 @@ with tab5:
             
             scout_records.append({
                 "Player": p_name,
+                "Data Source": row.get('Data Source', 'Unknown'),
                 "Role": row['Role'],
                 "Bat Peers (±1.5)": get_skill_peers(p_name, row['Bat_Rating'], 'Bat_Rating'),
                 "Bowl Peers (±1.5)": get_skill_peers(p_name, row['Bowl_Rating'], 'Bowl_Rating'),
@@ -837,6 +882,7 @@ with tab5:
         
         s_config = {
             "Player": st.column_config.Column(disabled=True),
+            "Data Source": st.column_config.TextColumn(disabled=True),
             "Role": st.column_config.Column(disabled=True),
             "Bat Peers (±1.5)": st.column_config.TextColumn(disabled=True),
             "Bowl Peers (±1.5)": st.column_config.TextColumn(disabled=True),
@@ -854,7 +900,7 @@ with tab5:
             .set_properties(subset=['My Final Score', 'Master Override'], **{'background-color': '#e6f2ff'})
         
         tab5_col_order = [
-            "Player", "Role", "Bat Peers (±1.5)", "Bowl Peers (±1.5)", "Field Peers (±1.5)", 
+            "Player", "Data Source", "Role", "Bat Peers (±1.5)", "Bowl Peers (±1.5)", "Field Peers (±1.5)", 
             "Avg Scout Score", "My Bat", "My Bowl", "My Field", "My Final Score", "AI Total", "Master Override"
         ]
         
@@ -956,11 +1002,12 @@ with tab7:
             app_config["gsheet_pool_col"] = new_gsheet_pool_col
             save_json(CONFIG_FILE, app_config)
             
+            # Wipe any previous manual pool status overrides so the Google Form takes full control
             save_json(POOL_FILE, {})
             pool_state.clear()
+            get_raw_live_roster.clear()
             
             st.success("Google Sheet configuration saved! Roster and Pool Status have been updated.")
-            get_raw_live_roster.clear()
             st.rerun()
 
         st.markdown("---")
@@ -1022,6 +1069,7 @@ with tab7:
         st.write("Modify the mathematical importance of each metric, or configure the Salary Cap.")
         
         st.markdown("##### 🎯 Salary Cap Rules")
+        st.write("*(Changes made here save instantly and reflect in the Draft Room!)*")
         sc1, sc2, sc3 = st.columns(3)
         w_squad_size = sc1.number_input("Max Players Per Team", value=int(algo_weights.get("squad_size", 11)), step=1, key="cap_squad", on_change=update_cap_settings)
         w_team_budget = sc2.number_input("Team Point Budget", value=float(algo_weights.get("team_budget", 240.0)), step=5.0, key="cap_budget", on_change=update_cap_settings)
@@ -1099,6 +1147,8 @@ with tab7:
 
         st.markdown("---")
         st.markdown("### 7. 💾 Permanent Cloud Backup & Restore")
+        st.write("Because free servers reset when code changes, download your server state to save your mappings and rosters permanently.")
+        
         bc1, bc2 = st.columns(2)
         with bc1:
             backup_data = {
