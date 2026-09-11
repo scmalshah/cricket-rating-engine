@@ -328,35 +328,54 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w, valid_players=No
         
     valid['Final_Raw'] = valid.apply(calc_final, axis=1)
 
-    mean_raw = valid['Final_Raw'].mean()
-    std_raw = valid['Final_Raw'].std() or 1
-    
-    # 1. Primary AI Rating (Shifted Normal Distribution: Center 15.0, Spread 3.5)
-    valid['AI Rating'] = 15.0 + ((valid['Final_Raw'] - mean_raw) / std_raw) * 3.5
-    valid['AI Rating'] = valid['AI Rating'].clip(lower=5.0, upper=30.0).round(1)
-    
-    # 2. Rtg_MinMax (For Reference)
-    min_raw = valid['Final_Raw'].min()
-    max_raw = valid['Final_Raw'].max()
-    if max_raw == min_raw:
-        valid['Rtg_MinMax'] = 15.0
+    n_players = len(valid)
+    if n_players <= 1:
+        valid['AI Rating'] = 20.0
+        valid['Rtg_MinMax'] = 20.0
+        valid['Rtg_Pct'] = 20.0
     else:
-        valid['Rtg_MinMax'] = 5.0 + ((valid['Final_Raw'] - min_raw) / (max_raw - min_raw)) * 25.0
-    valid['Rtg_MinMax'] = valid['Rtg_MinMax'].clip(lower=5.0, upper=30.0).round(1)
-    
-    # 3. Rtg_Pct (Uniform Percentile Reference)
-    pct_ranks = valid['Final_Raw'].rank(method='first', pct=True)
-    valid['Rtg_Pct'] = 5.0 + (pct_ranks * 25.0)
-    valid['Rtg_Pct'] = valid['Rtg_Pct'].clip(lower=5.0, upper=30.0).round(1)
-    
-    for col, new_col in [('Bat_Score', 'Bat_Rating'), ('Bowl_Score', 'Bowl_Rating'), ('Fielding_Score', 'Field_Rating')]:
-        mean_val = valid[col].mean()
-        std_val = valid[col].std() or 1
-        valid[new_col] = 15.0 + ((valid[col] - mean_val) / std_val) * 3.5
-        valid[new_col] = valid[new_col].clip(lower=5.0, upper=30.0).round(1)
+        # Strict ranking to prevent decimal ties
+        ranks = valid['Final_Raw'].rank(method='first', ascending=True)
+        mid_rank = (n_players + 1) / 2.0
+        
+        # Dual-Anchor Scale: Top = 30.0, Median = 15.5, Bottom = 10.0
+        def compute_dual_anchor(r):
+            if r >= mid_rank:
+                if n_players == mid_rank:
+                    return 30.0
+                return 15.5 + 14.5 * ((r - mid_rank) / (n_players - mid_rank))
+            else:
+                if mid_rank == 1.0:
+                    return 10.0
+                return 10.0 + 5.5 * ((r - 1.0) / (mid_rank - 1.0))
+                
+        valid['AI Rating'] = ranks.apply(compute_dual_anchor).clip(lower=10.0, upper=30.0).round(1)
+        
+        # Linear Min-Max (Bottom = 10.0, Top = 30.0)
+        min_raw = valid['Final_Raw'].min()
+        max_raw = valid['Final_Raw'].max()
+        if max_raw == min_raw:
+            valid['Rtg_MinMax'] = 20.0
+        else:
+            valid['Rtg_MinMax'] = 10.0 + ((valid['Final_Raw'] - min_raw) / (max_raw - min_raw)) * 20.0
+        valid['Rtg_MinMax'] = valid['Rtg_MinMax'].clip(lower=10.0, upper=30.0).round(1)
+        
+        # Uniform Percentile (10.0 to 30.0)
+        pct_ranks = valid['Final_Raw'].rank(method='first', pct=True)
+        valid['Rtg_Pct'] = 10.0 + (pct_ranks * 20.0)
+        valid['Rtg_Pct'] = valid['Rtg_Pct'].clip(lower=10.0, upper=30.0).round(1)
 
-    # Shifted Tiers to match the new 15.0 average
-    valid['Tier'] = pd.cut(valid['AI Rating'], bins=[-1, 12.9, 18.9, 23.9, 31], labels=["Bronze", "Silver", "Gold", "Platinum"])
+    for col, new_col in [('Bat_Score', 'Bat_Rating'), ('Bowl_Score', 'Bowl_Rating'), ('Fielding_Score', 'Field_Rating')]:
+        c_min = valid[col].min()
+        c_max = valid[col].max()
+        if c_max == c_min:
+            valid[new_col] = 15.0
+        else:
+            valid[new_col] = 10.0 + ((valid[col] - c_min) / (c_max - c_min)) * 20.0
+        valid[new_col] = valid[new_col].clip(lower=10.0, upper=30.0).round(1)
+
+    # Tiers aligned with the 15.5 median
+    valid['Tier'] = pd.cut(valid['AI Rating'], bins=[-1, 13.9, 19.9, 25.9, 31], labels=["Bronze", "Silver", "Gold", "Platinum"])
     return valid
 
 file_time = os.path.getmtime(DATA_FILE) if os.path.exists(DATA_FILE) else 0
@@ -414,7 +433,7 @@ if not master_df.empty:
     if 'Role' not in master_df.columns: master_df['Role'] = 'Batter'
     master_df['Role'] = master_df['Role'].fillna('Batter')
     
-    master_df['Tier'] = pd.cut(master_df['AI Rating'], bins=[-1, 12.9, 18.9, 23.9, 31], labels=["Bronze", "Silver", "Gold", "Platinum"])
+    master_df['Tier'] = pd.cut(master_df['AI Rating'], bins=[-1, 13.9, 19.9, 25.9, 31], labels=["Bronze", "Silver", "Gold", "Platinum"])
 
     master_df['Draft Status'] = master_df['Player'].apply(lambda x: draft_state.get(x, "Available"))
     master_df['Leadership'] = master_df['Player'].apply(lambda x: leadership_state.get(x, "None"))
@@ -456,14 +475,14 @@ with tab1:
         total_p = len(master_df)
         avail_p = len(master_df[master_df['Draft Status'] == "Available"])
         plat_p = len(master_df[master_df['Tier'] == "Platinum"])
-        avg_p = round(master_df['AI Rating'].mean(), 1)
+        avg_p = round(master_df[master_df['AI Rating'] > 0]['AI Rating'].mean(), 1) if not master_df[master_df['AI Rating'] > 0].empty else 0.0
         
         st.markdown(f"""
         <div style="display: flex; justify-content: space-between; text-align: center; background-color: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 15px; border: 1px solid #e9ecef;">
             <div style="flex: 1;"><span style="font-size: 0.85em; color: #6c757d; font-weight: 600; text-transform: uppercase;">Total Players</span><br><span style="font-size: 1.6em; font-weight: bold;">{total_p}</span></div>
             <div style="flex: 1;"><span style="font-size: 0.85em; color: #6c757d; font-weight: 600; text-transform: uppercase;">Available</span><br><span style="font-size: 1.6em; font-weight: bold; color: #28a745;">{avail_p}</span></div>
             <div style="flex: 1;"><span style="font-size: 0.85em; color: #6c757d; font-weight: 600; text-transform: uppercase;">Platinum Tier</span><br><span style="font-size: 1.6em; font-weight: bold; color: #6f42c1;">{plat_p}</span></div>
-            <div style="flex: 1;"><span style="font-size: 0.85em; color: #6c757d; font-weight: 600; text-transform: uppercase;">Avg AI Rating</span><br><span style="font-size: 1.6em; font-weight: bold;">{avg_p}</span></div>
+            <div style="flex: 1;"><span style="font-size: 0.85em; color: #6c757d; font-weight: 600; text-transform: uppercase;">Avg Rated Score</span><br><span style="font-size: 1.6em; font-weight: bold;">{avg_p}</span></div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -495,7 +514,7 @@ with tab1:
             'Runs', 'Bat Avg', 'Bat SR', 'Bound %',
             'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 'Extras/Ov',
             'Fielding', 'Bat Rtg', 'Bowl Rtg', 'Field Rtg', 
-            'AI Rtg (Z-Score)', 'AI Rtg (MinMax)', 'AI Rtg (Pct)'
+            'AI Rating', 'Rtg (MinMax)', 'Rtg (Pct)'
         ] + auth_users + ['Avg Scout Score', 'Scout Override', 'Final Scout Rating', 'Draft Status']
         
         disp_df.columns = new_columns
@@ -506,13 +525,13 @@ with tab1:
             'Bat Avg': '{:.2f}', 'Bat SR': '{:.1f}', 'Bound %': '{:.1f}%',
             'Bowl Avg': '{:.2f}', 'Bowl SR': '{:.1f}', 'Econ': '{:.2f}', 'Extras/Ov': '{:.2f}',
             'Bat Rtg': '{:.1f}', 'Bowl Rtg': '{:.1f}', 'Field Rtg': '{:.1f}',
-            'AI Rtg (Z-Score)': '{:.1f}', 'AI Rtg (MinMax)': '{:.1f}', 'AI Rtg (Pct)': '{:.1f}', 
+            'AI Rating': '{:.1f}', 'Rtg (MinMax)': '{:.1f}', 'Rtg (Pct)': '{:.1f}', 
             'Avg Scout Score': '{:.1f}', 'Scout Override': '{:.1f}', 'Final Scout Rating': '{:.1f}'
         }
         for u in auth_users:
             fmt_dict[u] = '{:.1f}'
             
-        styled_df = disp_df.style.background_gradient(subset=['AI Rtg (Z-Score)', 'AI Rtg (MinMax)', 'AI Rtg (Pct)', 'Final Scout Rating'], cmap='RdYlGn', vmin=0, vmax=30)\
+        styled_df = disp_df.style.background_gradient(subset=['AI Rating', 'Rtg (MinMax)', 'Rtg (Pct)', 'Final Scout Rating'], cmap='RdYlGn', vmin=0, vmax=30)\
             .format(fmt_dict, na_rep="-")
             
         st.dataframe(styled_df, use_container_width=True, column_order=disp_df.columns.tolist())
@@ -708,9 +727,9 @@ with tab4:
                 
                 st.markdown("---")
                 st.markdown("#### Mathematical Evaluations")
-                st.markdown(f"**AI Rtg (Z-Score):** `{p_data['AI Rating']:.1f}` *(Shifted Normal Distribution)*")
-                st.markdown(f"**AI Rtg (MinMax):** `{p_data.get('Rtg_MinMax', 0.0):.1f}` *(Linear Scale from Best to Worst)*")
-                st.markdown(f"**AI Rtg (Percentile):** `{p_data.get('Rtg_Pct', 0.0):.1f}` *(Uniform Ranking)*")
+                st.markdown(f"**AI Rating:** `{p_data['AI Rating']:.1f}` *(Dual-Anchor: Top=30.0, Median=15.5)*")
+                st.markdown(f"**Rtg (MinMax):** `{p_data.get('Rtg_MinMax', 0.0):.1f}` *(Linear Scale from Best to Worst)*")
+                st.markdown(f"**Rtg (Pct):** `{p_data.get('Rtg_Pct', 0.0):.1f}` *(Uniform Percentile)*")
                 st.markdown(f"**Final Scout Rating:** `{p_data['Final Scout Rating']:.1f}` *(Human Committee)*")
                 st.markdown(f"**Drafted To:** {p_data['Draft Status']}")
                 
@@ -959,22 +978,21 @@ with tab6:
     st.subheader("🧠 How the AI Rating is Calculated")
     
     st.markdown(f"""
-    To create maximum separation between players and ensure a fair draft, the BPL Engine uses dynamic, customizable weighting logic.
+    To create clear separation between players and ensure a fair draft, the BPL Engine uses a **Dual-Anchor Uniform Distribution**.
 
-    ### 1. Granular Core Metrics
-    The engine balances **8 distinct data points** dynamically based on your custom Admin settings:
+    ### 1. The Dual-Anchor Distribution Curve
+    *   **Top Performer (#1 Rank):** Anchored at **30.0**.
+    *   **Median/Average Performer:** Anchored at **15.5**.
+    *   **Lowest Qualified Performer:** Anchored at **10.0**.
+    *   **Rookies with No Stats:** Default to **0.0** to protect salary cap integrity.
+
+    ### 2. Eliminating Decimal Ties
+    Instead of standard bell curves that squeeze players together in the middle with 0.1 differences, the engine scales linearly between the anchors. Every player in the middle range gets a dedicated, visible step (typically **0.4 to 0.9 points** between adjacent players).
+
+    ### 3. Core Granular Metrics
     *   **Batting Score:** Total Runs ({w['bat_runs']}%), Batting Avg ({w['bat_avg']}%), Strike Rate ({w['bat_sr']}%), Balls Per Dismissal ({w['bat_bpd']}%), and Boundary Impact ({w['bat_bound']}%).
     *   **Bowling Score:** Total Wickets ({w['bowl_wkts']}%), Economy Rate ({w['bowl_econ']}%), Bowling Avg ({w['bowl_avg']}%), Bowling Strike Rate ({w['bowl_sr']}%), and Extras/Discipline Penalty ({w['bowl_extras']}%).
-    *   **Fielding Score:** The sum of all Catches, Run-Outs, and Stumpings.
-
-    ### 2. Weights & The All-Rounder Premium
-    Players are assigned a role based on strict minimum thresholds:
-    * **Batter:** Batting ({w['wt_batter_bat']}%) + Fielding ({w['wt_batter_field']}%)
-    * **Bowler:** Bowling ({w['wt_bowler_bowl']}%) + Fielding ({w['wt_bowler_field']}%)
-    * **All-Rounder:** `[Batting ({w['wt_ar_bat']}%) + Bowling ({w['wt_ar_bowl']}%) + Fielding ({w['wt_ar_field']}%)] * {w['ar_multiplier']} Multiplier`
-    
-    ### 3. T-Score Distribution
-    The algorithm takes all raw scores and scales them onto a completely uniform, shifted Normal Distribution curve. The absolute league average player is mathematically centered at a **15.0 AI Rating** to suppress salary inflation, while spreading players naturally based on their standard deviations. Rookies without stats default to **0.0**.
+    *   **Fielding Score:** Catches, Run-Outs, and Stumpings.
     """)
 
 # --- TAB 7: ADMIN & DATA ---
@@ -1067,14 +1085,13 @@ with tab7:
         st.write("Modify the mathematical importance of each metric, or configure the Salary Cap.")
         
         st.markdown("##### 🎯 Salary Cap Rules")
-        st.write("*(Changes made here save instantly and reflect in the Draft Room!)*")
         sc1, sc2, sc3 = st.columns(3)
         w_squad_size = sc1.number_input("Max Players Per Team", value=int(algo_weights.get("squad_size", 11)), step=1, key="cap_squad", on_change=update_cap_settings)
         w_team_budget = sc2.number_input("Team Point Budget", value=float(algo_weights.get("team_budget", 240.0)), step=5.0, key="cap_budget", on_change=update_cap_settings)
         
         if not master_df.empty:
             valid_teams_ct = len([t for t in TEAMS if t != "Available"])
-            ideal_pool = master_df[(master_df['Pool Status'] == "Team Player")].sort_values('AI Rating', ascending=False).head(valid_teams_ct * w_squad_size)
+            ideal_pool = master_df[(master_df['Pool Status'] == "Team Player") & (master_df['AI Rating'] > 0)].sort_values('AI Rating', ascending=False).head(valid_teams_ct * w_squad_size)
             suggested_cap = ideal_pool['AI Rating'].sum() / valid_teams_ct if valid_teams_ct > 0 else 0.0
             sc3.info(f"**Suggested Cap:** {suggested_cap:.1f} pts\n\n*(Based on top {valid_teams_ct * w_squad_size} Team Players)*")
         
@@ -1145,8 +1162,6 @@ with tab7:
 
         st.markdown("---")
         st.markdown("### 7. 💾 Permanent Cloud Backup & Restore")
-        st.write("Because free servers reset when code changes, download your server state to save your mappings and rosters permanently.")
-        
         bc1, bc2 = st.columns(2)
         with bc1:
             backup_data = {
