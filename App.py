@@ -159,11 +159,13 @@ def get_raw_excel_data(file_mod_time):
     
     for s in xls.sheet_names:
         s_lower = s.lower()
+        # Bulletproof check: strip all spaces, underscores, and dashes
+        s_clean = s_lower.replace(" ", "").replace("_", "").replace("-", "")
         
-        # Tag the source based on sheet name
-        if 'season 8' in s_lower:
+        # Tag the source based on the cleaned sheet name
+        if 'season8' in s_clean or 's8' in s_clean:
             series_tag = 'Season 8'
-        elif 'rjvsnonrj' in s_lower.replace(" ", ""):
+        elif 'rjvsnonrj' in s_clean:
             series_tag = 'Core Series'
         else:
             series_tag = 'Other'
