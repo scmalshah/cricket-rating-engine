@@ -109,9 +109,14 @@ algo_weights = load_json(WEIGHTS_FILE, DEFAULT_WEIGHTS)
 for k, v in DEFAULT_WEIGHTS.items():
     if k not in algo_weights: algo_weights[k] = v
 
-# --- HEADER ---
-st.title("🏏 BPL Cricket")
-st.markdown("Advanced AI Rating, Live Roster Management, and Committee Ratings.")
+# --- HEADER & GLOBAL FILTERS ---
+h_col1, h_col2 = st.columns([3, 1])
+with h_col1:
+    st.title("🏏 BPL Cricket")
+    st.markdown("Advanced AI Rating, Live Roster Management, and Committee Ratings.")
+with h_col2:
+    st.markdown("<br>", unsafe_allow_html=True)
+    series_filter = st.selectbox("📊 Historical Stats Filter", ["All Combined", "Season 8 Only", "Core Series Only"])
 
 # --- DATA PROCESSING ENGINE ---
 @st.cache_data(show_spinner="Syncing Secure Live Roster from Google Forms...", ttl=60)
@@ -145,7 +150,7 @@ def get_raw_live_roster(url, col_name, pool_col_name):
         st.error(f"⚠️ Could not sync roster securely: {e}")
         return pd.DataFrame()
 
-@st.cache_data(show_spinner="Reading Excel File (Only happens once)...")
+@st.cache_data(show_spinner="Reading Excel File & Tagging Series...")
 def get_raw_excel_data(file_mod_time):
     if not os.path.exists(DATA_FILE): return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), []
     xls = pd.ExcelFile(DATA_FILE)
@@ -153,19 +158,30 @@ def get_raw_excel_data(file_mod_time):
     raw_names = set()
     
     for s in xls.sheet_names:
-        header_idx = 1 if 'practice' in s.lower() else 0
+        s_lower = s.lower()
+        
+        # Tag the source based on sheet name
+        if 'season 8' in s_lower:
+            series_tag = 'Season 8'
+        elif 'rjvsnonrj' in s_lower.replace(" ", ""):
+            series_tag = 'Core Series'
+        else:
+            series_tag = 'Other'
+
+        header_idx = 1 if 'practice' in s_lower else 0
         df = pd.read_excel(xls, sheet_name=s, header=header_idx)
         df.columns = [clean_col_name(c) for c in df.columns]
         if 'Player' in df.columns:
             df['Player'] = df['Player'].apply(clean_prefix)
+            df['Series_Tag'] = series_tag
             raw_names.update(df['Player'].dropna().unique())
             
-            if 'bat' in s.lower(): bat_dfs.append(df)
-            elif 'bowl' in s.lower(): bowl_dfs.append(df)
+            if 'bat' in s_lower: bat_dfs.append(df)
+            elif 'bowl' in s_lower: bowl_dfs.append(df)
             
             f_cols = [c for c in df.columns if any(x in c.lower() for x in ['catch', 'run out', 'stump', 'fielding'])]
             if f_cols:
-                f_df = df[['Player'] + f_cols].copy()
+                f_df = df[['Player', 'Series_Tag'] + f_cols].copy()
                 field_dfs.append(f_df)
 
     raw_bat = pd.concat(bat_dfs, ignore_index=True) if bat_dfs else pd.DataFrame()
@@ -180,12 +196,10 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w, valid_players=No
     
     rbat, rbowl, rfield = raw_bat.copy(), raw_bowl.copy(), raw_field.copy()
 
-    # Map names first
     if not rbat.empty: rbat['Player'] = rbat['Player'].map(mapping).fillna(rbat['Player'])
     if not rbowl.empty: rbowl['Player'] = rbowl['Player'].map(mapping).fillna(rbowl['Player'])
     if not rfield.empty: rfield['Player'] = rfield['Player'].map(mapping).fillna(rfield['Player'])
 
-    # IMPORTANT: Filter to ONLY include players who have registered on the form before doing any math
     if valid_players is not None:
         if not rbat.empty: rbat = rbat[rbat['Player'].isin(valid_players)]
         if not rbowl.empty: rbowl = rbowl[rbowl['Player'].isin(valid_players)]
@@ -234,8 +248,9 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w, valid_players=No
 
     if not rfield.empty:
         for col in rfield.columns:
-            if col != 'Player': rfield[col] = pd.to_numeric(rfield[col], errors='coerce').fillna(0)
-        rfield['Total_Fielding'] = rfield.drop(columns=['Player']).sum(axis=1)
+            if col not in ['Player', 'Series_Tag']: 
+                rfield[col] = pd.to_numeric(rfield[col], errors='coerce').fillna(0)
+        rfield['Total_Fielding'] = rfield.drop(columns=['Player', 'Series_Tag'], errors='ignore').sum(axis=1)
         agg_field = rfield.groupby('Player').agg(Total_Fielding=('Total_Fielding', 'sum')).reset_index()
     else:
         agg_field = pd.DataFrame(columns=['Player', 'Total_Fielding'])
@@ -314,13 +329,11 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w, valid_players=No
         
     valid['Final_Raw'] = valid.apply(calc_final, axis=1)
 
-    # 1. Standard Normal Z-Score Calculation (Now only calculated against active players)
     mean_raw = valid['Final_Raw'].mean()
     std_raw = valid['Final_Raw'].std() or 1
     valid['AI Rating'] = 20.0 + ((valid['Final_Raw'] - mean_raw) / std_raw) * 3.33
     valid['AI Rating'] = valid['AI Rating'].clip(lower=10.0, upper=30.0).round(1)
     
-    # 2. Min-Max Standardization
     min_raw = valid['Final_Raw'].min()
     max_raw = valid['Final_Raw'].max()
     if max_raw == min_raw:
@@ -329,7 +342,6 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w, valid_players=No
         valid['Rtg_MinMax'] = 10.0 + ((valid['Final_Raw'] - min_raw) / (max_raw - min_raw)) * 20.0
     valid['Rtg_MinMax'] = valid['Rtg_MinMax'].clip(lower=10.0, upper=30.0).round(1)
     
-    # 3. Percentile Rank
     pct_ranks = valid['Final_Raw'].rank(pct=True)
     valid['Rtg_Pct'] = 10.0 + (pct_ranks * 20.0)
     valid['Rtg_Pct'] = valid['Rtg_Pct'].clip(lower=10.0, upper=30.0).round(1)
@@ -340,7 +352,6 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w, valid_players=No
         valid[new_col] = 20.0 + ((valid[col] - mean_val) / std_val) * 3.33
         valid[new_col] = valid[new_col].clip(lower=10.0, upper=30.0).round(1)
 
-    # Keep Z-Score Primary for Tiers
     valid['Tier'] = pd.cut(valid['AI Rating'], bins=[0, 16.9, 22.9, 26.9, 31], labels=["Bronze", "Silver", "Gold", "Platinum"])
     return valid
 
@@ -351,14 +362,28 @@ raw_bat_cache, raw_bowl_cache, raw_field_cache, all_raw_names = get_raw_excel_da
 raw_live_df = get_raw_live_roster(app_config.get("gsheet_url"), app_config.get("gsheet_col"), app_config.get("gsheet_pool_col"))
 raw_live_names = raw_live_df['Raw_Name'].tolist() if not raw_live_df.empty else []
 
+# --- APPLY SERIES FILTER BEFORE CALCULATION ---
+filtered_bat = raw_bat_cache.copy()
+filtered_bowl = raw_bowl_cache.copy()
+filtered_field = raw_field_cache.copy()
+
+if series_filter == "Season 8 Only":
+    if not filtered_bat.empty: filtered_bat = filtered_bat[filtered_bat['Series_Tag'] == 'Season 8']
+    if not filtered_bowl.empty: filtered_bowl = filtered_bowl[filtered_bowl['Series_Tag'] == 'Season 8']
+    if not filtered_field.empty: filtered_field = filtered_field[filtered_field['Series_Tag'] == 'Season 8']
+elif series_filter == "Core Series Only":
+    if not filtered_bat.empty: filtered_bat = filtered_bat[filtered_bat['Series_Tag'] == 'Core Series']
+    if not filtered_bowl.empty: filtered_bowl = filtered_bowl[filtered_bowl['Series_Tag'] == 'Core Series']
+    if not filtered_field.empty: filtered_field = filtered_field[filtered_field['Series_Tag'] == 'Core Series']
+
 # --- GOOGLE SHEET LIVE INTEGRATION ---
 if not raw_live_df.empty:
     raw_live_df['Player'] = raw_live_df['Raw_Name'].map(lambda x: saved_mapping.get(x, x))
     roster_df = raw_live_df.groupby('Player').last().reset_index()[['Player', 'Form_Pool_Status']]
     registered_players = tuple(roster_df['Player'].tolist())
     
-    # Calculate Excel Ratings strictly on registered players
-    excel_master_df = calculate_ratings(raw_bat_cache, raw_bowl_cache, raw_field_cache, saved_mapping, algo_weights, valid_players=registered_players)
+    # Calculate Ratings strictly on registered players using FILTERED data
+    excel_master_df = calculate_ratings(filtered_bat, filtered_bowl, filtered_field, saved_mapping, algo_weights, valid_players=registered_players)
     
     if not excel_master_df.empty:
         master_df = pd.merge(roster_df, excel_master_df, on="Player", how="left", indicator=True)
@@ -390,8 +415,7 @@ if not raw_live_df.empty:
         if c not in master_df.columns: master_df[c] = 0
         master_df[c] = master_df[c].fillna(0)
 else:
-    # Fallback if no Google Form is synced
-    excel_master_df = calculate_ratings(raw_bat_cache, raw_bowl_cache, raw_field_cache, saved_mapping, algo_weights)
+    excel_master_df = calculate_ratings(filtered_bat, filtered_bowl, filtered_field, saved_mapping, algo_weights)
     master_df = excel_master_df.copy()
     if not master_df.empty:
         master_df['Form_Pool_Status'] = "Team Player"
