@@ -190,7 +190,7 @@ def get_raw_excel_data(file_mod_time):
     return raw_bat, raw_bowl, raw_field, sorted(list(raw_names))
 
 @st.cache_data(show_spinner="Crunching AI Ratings with Custom Weights...")
-def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w):
+def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w, valid_players=None):
     if raw_bat.empty and raw_bowl.empty: return pd.DataFrame()
     
     rbat, rbowl, rfield = raw_bat.copy(), raw_bowl.copy(), raw_field.copy()
@@ -198,6 +198,13 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w):
     if not rbat.empty: rbat['Player'] = rbat['Player'].map(mapping).fillna(rbat['Player'])
     if not rbowl.empty: rbowl['Player'] = rbowl['Player'].map(mapping).fillna(rbowl['Player'])
     if not rfield.empty: rfield['Player'] = rfield['Player'].map(mapping).fillna(rfield['Player'])
+
+    if valid_players is not None:
+        if not rbat.empty: rbat = rbat[rbat['Player'].isin(valid_players)]
+        if not rbowl.empty: rbowl = rbowl[rbowl['Player'].isin(valid_players)]
+        if not rfield.empty: rfield = rfield[rfield['Player'].isin(valid_players)]
+
+    if rbat.empty and rbowl.empty: return pd.DataFrame()
 
     fours_col = next((c for c in rbat.columns if str(c).lower().strip() in ['4s', 'fours', '4', "4's"]), None)
     sixes_col = next((c for c in rbat.columns if str(c).lower().strip() in ['6s', 'sixes', '6', "6's"]), None)
@@ -240,8 +247,9 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w):
 
     if not rfield.empty:
         for col in rfield.columns:
-            if col != 'Player': rfield[col] = pd.to_numeric(rfield[col], errors='coerce').fillna(0)
-        rfield['Total_Fielding'] = rfield.drop(columns=['Player']).sum(axis=1)
+            if col not in ['Player']: 
+                rfield[col] = pd.to_numeric(rfield[col], errors='coerce').fillna(0)
+        rfield['Total_Fielding'] = rfield.drop(columns=['Player'], errors='ignore').sum(axis=1)
         agg_field = rfield.groupby('Player').agg(Total_Fielding=('Total_Fielding', 'sum')).reset_index()
     else:
         agg_field = pd.DataFrame(columns=['Player', 'Total_Fielding'])
@@ -323,8 +331,8 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w):
     mean_raw = valid['Final_Raw'].mean()
     std_raw = valid['Final_Raw'].std() or 1
     
-    # 1. Primary AI Rating (Shifted Normal Distribution: Center 15.0, Spread 5.0)
-    valid['AI Rating'] = 15.0 + ((valid['Final_Raw'] - mean_raw) / std_raw) * 5.0
+    # 1. Primary AI Rating (Shifted Normal Distribution: Center 15.0, Spread 3.5)
+    valid['AI Rating'] = 15.0 + ((valid['Final_Raw'] - mean_raw) / std_raw) * 3.5
     valid['AI Rating'] = valid['AI Rating'].clip(lower=5.0, upper=30.0).round(1)
     
     # 2. Rtg_MinMax (For Reference)
@@ -344,7 +352,7 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w):
     for col, new_col in [('Bat_Score', 'Bat_Rating'), ('Bowl_Score', 'Bowl_Rating'), ('Fielding_Score', 'Field_Rating')]:
         mean_val = valid[col].mean()
         std_val = valid[col].std() or 1
-        valid[new_col] = 15.0 + ((valid[col] - mean_val) / std_val) * 5.0
+        valid[new_col] = 15.0 + ((valid[col] - mean_val) / std_val) * 3.5
         valid[new_col] = valid[new_col].clip(lower=5.0, upper=30.0).round(1)
 
     # Shifted Tiers to match the new 15.0 average
@@ -362,8 +370,9 @@ raw_live_names = raw_live_df['Raw_Name'].tolist() if not raw_live_df.empty else 
 if not raw_live_df.empty:
     raw_live_df['Player'] = raw_live_df['Raw_Name'].map(lambda x: saved_mapping.get(x, x))
     roster_df = raw_live_df.groupby('Player').last().reset_index()[['Player', 'Form_Pool_Status']]
+    registered_players = tuple(roster_df['Player'].tolist())
     
-    excel_master_df = calculate_ratings(raw_bat_cache, raw_bowl_cache, raw_field_cache, saved_mapping, algo_weights)
+    excel_master_df = calculate_ratings(raw_bat_cache, raw_bowl_cache, raw_field_cache, saved_mapping, algo_weights, valid_players=registered_players)
     
     if not excel_master_df.empty:
         master_df = pd.merge(roster_df, excel_master_df, on="Player", how="left", indicator=True)
@@ -965,7 +974,7 @@ with tab6:
     * **All-Rounder:** `[Batting ({w['wt_ar_bat']}%) + Bowling ({w['wt_ar_bowl']}%) + Fielding ({w['wt_ar_field']}%)] * {w['ar_multiplier']} Multiplier`
     
     ### 3. T-Score Distribution
-    The algorithm takes all raw scores and scales them onto a completely uniform, shifted Normal Distribution curve. The absolute league average player is mathematically centered at a **15.0 AI Rating** instead of 20.0 to heavily suppress salary inflation. Rookies without stats default to **0.0**.
+    The algorithm takes all raw scores and scales them onto a completely uniform, shifted Normal Distribution curve. The absolute league average player is mathematically centered at a **15.0 AI Rating** to suppress salary inflation, while spreading players naturally based on their standard deviations. Rookies without stats default to **0.0**.
     """)
 
 # --- TAB 7: ADMIN & DATA ---
