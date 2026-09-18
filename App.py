@@ -78,14 +78,32 @@ def update_cap_settings():
         cw["team_budget"] = st.session_state.cap_budget
         save_json(WEIGHTS_FILE, cw)
 
-def extract_name(val):
-    v_str = str(val).strip()
-    if not v_str or pd.isna(val) or v_str == "None" or v_str == "--- CLEAR PICK ---": 
-        return ""
-    v_str = v_str.replace("🔒 ", "").replace("🔒", "")
-    if " (" in v_str and v_str.endswith(")"):
-        return v_str.rsplit(" (", 1)[0].strip()
-    return v_str.strip()
+# --- AUTO-RECOVERY ON SERVER REBOOT ---
+# If the Streamlit server resets and wipes local files, silently restore from Google Sheets on boot.
+def attempt_gsheets_restore():
+    if not os.path.exists(DRAFT_FILE) and "gsheet_url" in DEFAULT_CONFIG:
+        try:
+            conn = st.connection("gsheets", type=GSheetsConnection)
+            df = conn.read(spreadsheet=DEFAULT_CONFIG["gsheet_url"], worksheet="System_State", ttl=0)
+            if not df.empty and 'Key' in df.columns and 'Value' in df.columns:
+                for _, row in df.iterrows():
+                    key = row['Key']
+                    try:
+                        val = json.loads(row['Value'])
+                    except: continue
+                    if key == "mappings": save_json(MAPPING_FILE, val)
+                    elif key == "draft": save_json(DRAFT_FILE, val)
+                    elif key == "ratings": save_json(RATINGS_FILE, val)
+                    elif key == "weights": save_json(WEIGHTS_FILE, val)
+                    elif key == "leadership": save_json(LEADERSHIP_FILE, val)
+                    elif key == "pool": save_json(POOL_FILE, val)
+                    elif key == "overrides": save_json(OVERRIDES_FILE, val)
+                    elif key == "config": save_json(CONFIG_FILE, val)
+                    elif key == "users": save_json(USERS_FILE, val)
+        except Exception:
+            pass
+
+attempt_gsheets_restore()
 
 # --- LOAD STATES ---
 saved_mapping = load_json(MAPPING_FILE, {})
@@ -1163,7 +1181,7 @@ with tab7:
 
         st.markdown("---")
         st.markdown("### 7. 💾 Permanent Cloud Backup & Restore")
-        st.write("Because free servers reset when code changes, download your server state to save your mappings and rosters permanently.")
+        st.write("Legacy local file download and restore.")
         
         bc1, bc2 = st.columns(2)
         with bc1:
@@ -1192,7 +1210,6 @@ with tab7:
             if restore_file:
                 restore_data = json.load(restore_file)
                 
-                # Check if it's a raw ratings dump vs full server backup
                 if "ratings" not in restore_data and any(isinstance(v, dict) for v in restore_data.values()):
                     save_json(RATINGS_FILE, restore_data)
                     st.success("✅ Raw human ratings file detected and restored!")
@@ -1208,3 +1225,59 @@ with tab7:
                     if "users" in restore_data: save_json(USERS_FILE, restore_data.get("users", []))
                     st.success("✅ Server state fully restored!")
                 st.rerun()
+                
+        st.markdown("---")
+        st.markdown("### 8. ☁️ Google Sheets Database Sync")
+        st.write("Turn your Google Sheet into a permanent database! **Important:** You must create a blank tab named exactly `System_State` in your Google Sheet, and your Streamlit Secrets must contain your Service Account JSON.")
+        
+        gs_1, gs_2 = st.columns(2)
+        with gs_1:
+            if st.button("☁️ Push Current State to Google Sheets"):
+                with st.spinner("Writing to Google Sheets..."):
+                    try:
+                        conn = st.connection("gsheets", type=GSheetsConnection)
+                        url = app_config.get("gsheet_url", DEFAULT_CONFIG["gsheet_url"])
+                        
+                        backup_data = {
+                            "mappings": saved_mapping, "draft": draft_state, "ratings": human_ratings,
+                            "weights": algo_weights, "leadership": leadership_state, "pool": pool_state,
+                            "overrides": scout_overrides, "config": app_config, "users": auth_users
+                        }
+                        
+                        records = [{"Key": k, "Value": json.dumps(v)} for k, v in backup_data.items()]
+                        df_state = pd.DataFrame(records)
+                        
+                        conn.update(spreadsheet=url, worksheet="System_State", data=df_state)
+                        st.success("✅ State successfully backed up to 'System_State' tab in Google Sheets!")
+                    except Exception as e:
+                        st.error(f"⚠️ Write failed. Ensure the 'System_State' tab exists and Secrets are configured. Error: {e}")
+                        
+        with gs_2:
+            if st.button("📥 Force Pull State from Google Sheets"):
+                with st.spinner("Reading from Google Sheets..."):
+                    try:
+                        conn = st.connection("gsheets", type=GSheetsConnection)
+                        url = app_config.get("gsheet_url", DEFAULT_CONFIG["gsheet_url"])
+                        df = conn.read(spreadsheet=url, worksheet="System_State", ttl=0)
+                        
+                        if not df.empty and 'Key' in df.columns:
+                            for _, row in df.iterrows():
+                                key = row['Key']
+                                try: val = json.loads(row['Value'])
+                                except: continue
+                                
+                                if key == "mappings": save_json(MAPPING_FILE, val)
+                                elif key == "draft": save_json(DRAFT_FILE, val)
+                                elif key == "ratings": save_json(RATINGS_FILE, val)
+                                elif key == "weights": save_json(WEIGHTS_FILE, val)
+                                elif key == "leadership": save_json(LEADERSHIP_FILE, val)
+                                elif key == "pool": save_json(POOL_FILE, val)
+                                elif key == "overrides": save_json(OVERRIDES_FILE, val)
+                                elif key == "config": save_json(CONFIG_FILE, val)
+                                elif key == "users": save_json(USERS_FILE, val)
+                            st.success("✅ State fully restored from Google Sheets!")
+                            st.rerun()
+                        else:
+                            st.warning("⚠️ No data found in the 'System_State' tab.")
+                    except Exception as e:
+                        st.error(f"⚠️ Read failed. Ensure the 'System_State' tab exists. Error: {e}")
