@@ -34,7 +34,7 @@ DEFAULT_MAPPINGS = {
 
 DEFAULT_WEIGHTS = {
     "bat_runs": 20.0, "bat_avg": 30.0, "bat_sr": 25.0, "bat_bpd": 10.0, "bat_bound": 15.0,
-    "bowl_wkts": 30.0, "bowl_econ": 25.0, "bowl_avg": 20.0, "bowl_sr": 15.0, "bowl_extras": 10.0,
+    "bowl_wkts": 25.0, "bowl_econ": 25.0, "bowl_avg": 15.0, "bowl_sr": 15.0, "bowl_dots": 10.0, "bowl_extras": 10.0,
     "wt_batter_bat": 85.0, "wt_batter_field": 15.0,
     "wt_bowler_bowl": 85.0, "wt_bowler_field": 15.0,
     "wt_ar_bat": 42.5, "wt_ar_bowl": 42.5, "wt_ar_field": 15.0, "ar_multiplier": 1.3,
@@ -267,6 +267,11 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w, valid_players=No
 
     extras = np.zeros(len(rbowl))
     if not rbowl.empty:
+        # Detect Dot Balls
+        dots_col = next((c for c in rbowl.columns if str(c).lower().strip() in ['dots', 'dot balls', 'dot', '0s', '0', 'dotball']), None)
+        if dots_col: rbowl['Dots'] = pd.to_numeric(rbowl[dots_col], errors='coerce').fillna(0)
+        else: rbowl['Dots'] = 0
+
         for col in rbowl.columns:
             cl = str(col).lower().strip()
             if cl in ['wd', 'wide', 'wides', 'nb', 'no ball', 'noballs', 'no balls']:
@@ -277,9 +282,12 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w, valid_players=No
             rbowl[col] = pd.to_numeric(rbowl.get(col, 0), errors='coerce').fillna(0)
         rbowl['Balls_Bowled'] = rbowl['Overs'].apply(overs_to_balls)
         
-        agg_bowl = rbowl.groupby('Player').agg(Balls_Bowled=('Balls_Bowled', 'sum'), Runs_bowl=('Runs', 'sum'), Wkts=('Wkts', 'sum'), Total_Extras=('Total_Extras', 'sum')).reset_index()
+        agg_bowl = rbowl.groupby('Player').agg(
+            Balls_Bowled=('Balls_Bowled', 'sum'), Runs_bowl=('Runs', 'sum'), Wkts=('Wkts', 'sum'), 
+            Total_Extras=('Total_Extras', 'sum'), Dots=('Dots', 'sum')
+        ).reset_index()
     else:
-        agg_bowl = pd.DataFrame(columns=['Player', 'Balls_Bowled', 'Runs_bowl', 'Wkts', 'Total_Extras'])
+        agg_bowl = pd.DataFrame(columns=['Player', 'Balls_Bowled', 'Runs_bowl', 'Wkts', 'Total_Extras', 'Dots'])
 
     if not rfield.empty:
         for col in rfield.columns:
@@ -298,6 +306,7 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w, valid_players=No
 
     if 'Fours' not in valid.columns: valid['Fours'] = 0
     if 'Sixes' not in valid.columns: valid['Sixes'] = 0
+    if 'Dots' not in valid.columns: valid['Dots'] = 0
     
     valid['Bound_Runs'] = (valid['Fours'] * 4) + (valid['Sixes'] * 6)
     valid['Boundary_Pct'] = np.where(valid['Runs_bat'] > 0, (valid['Bound_Runs'] / valid['Runs_bat']) * 100, 0)
@@ -308,12 +317,14 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w, valid_players=No
     valid['Bowl SR'] = np.where(valid['Wkts'] > 0, valid['Balls_Bowled'] / valid['Wkts'], valid['Balls_Bowled'])
     valid['Bat BPD'] = np.where(valid['Dismissals'] > 0, valid['Balls_Faced'] / valid['Dismissals'], valid['Balls_Faced'])
     valid['Extras_Rate'] = np.where(valid['Balls_Bowled'] > 0, (valid['Total_Extras'] / valid['Balls_Bowled']) * 6, 0)
+    valid['Dot_Pct'] = np.where(valid['Balls_Bowled'] > 0, (valid['Dots'] / valid['Balls_Bowled']) * 100, 0)
     valid['Overs'] = valid['Balls_Bowled'].apply(format_overs)
 
     mean_avg = valid['Runs_bat'].sum() / (valid['Dismissals'].sum() or 1)
     mean_bpd = valid['Balls_Faced'].sum() / (valid['Dismissals'].sum() or 1)
     mean_bowl_sr = valid['Balls_Bowled'].sum() / (valid['Wkts'].sum() or 1)
     mean_extras_rate = (valid['Total_Extras'].sum() / (valid['Balls_Bowled'].sum() or 1)) * 6
+    league_dot_pct = valid['Dots'].sum() / (valid['Balls_Bowled'].sum() or 1)
 
     valid['Sm_Avg'] = (valid['Runs_bat'] + (mean_avg * 3)) / (valid['Dismissals'] + 3)
     valid['Sm_SR'] = ((valid['Runs_bat'] + ((valid['Runs_bat'].sum() / (valid['Balls_Faced'].sum() or 1) * 100) / 100 * 30)) / (valid['Balls_Faced'] + 30)) * 100
@@ -326,6 +337,7 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w, valid_players=No
     valid['Sm_Avg_bowl'] = (valid['Runs_bowl'] + ((valid['Runs_bowl'].sum() / (valid['Balls_Bowled'].sum() or 1) * 6) * 5)) / (valid['Wkts'] + 5)
     valid['Sm_Bowl_SR'] = (valid['Balls_Bowled'] + (mean_bowl_sr * 5)) / (valid['Wkts'] + 5)
     valid['Sm_Extras'] = ((valid['Total_Extras'] + (mean_extras_rate / 6 * 30)) / (valid['Balls_Bowled'] + 30)) * 6
+    valid['Sm_Dot_Pct'] = ((valid['Dots'] + (league_dot_pct * 30)) / (valid['Balls_Bowled'] + 30)) * 100
 
     z_runs = (valid['Runs_bat'] - valid['Runs_bat'].mean()) / (valid['Runs_bat'].std() or 1)
     z_avg = (valid['Sm_Avg'] - valid['Sm_Avg'].mean()) / (valid['Sm_Avg'].std() or 1)
@@ -338,15 +350,17 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w, valid_players=No
     z_avg_bowl = (valid['Sm_Avg_bowl'].mean() - valid['Sm_Avg_bowl']) / (valid['Sm_Avg_bowl'].std() or 1)
     z_bowl_sr = (valid['Sm_Bowl_SR'].mean() - valid['Sm_Bowl_SR']) / (valid['Sm_Bowl_SR'].std() or 1) 
     z_extras = (valid['Sm_Extras'].mean() - valid['Sm_Extras']) / (valid['Sm_Extras'].std() or 1) 
+    z_dots = (valid['Sm_Dot_Pct'] - valid['Sm_Dot_Pct'].mean()) / (valid['Sm_Dot_Pct'].std() or 1)
     
     valid['Fielding_Score'] = (valid['Total_Fielding'] - valid['Total_Fielding'].mean()) / (valid['Total_Fielding'].std() or 1)
 
     bat_tot = w['bat_runs'] + w['bat_avg'] + w['bat_sr'] + w['bat_bpd'] + w['bat_bound'] or 1
-    bowl_tot = w['bowl_wkts'] + w['bowl_econ'] + w['bowl_avg'] + w['bowl_sr'] + w['bowl_extras'] or 1
+    bowl_tot = w['bowl_wkts'] + w['bowl_econ'] + w['bowl_avg'] + w['bowl_sr'] + w['bowl_extras'] + w.get('bowl_dots', 10.0) or 1
     
     valid['Bat_Score'] = (z_runs * (w['bat_runs']/bat_tot)) + (z_avg * (w['bat_avg']/bat_tot)) + (z_sr * (w['bat_sr']/bat_tot)) + (z_bpd * (w['bat_bpd']/bat_tot)) + (z_bound * (w['bat_bound']/bat_tot))
-    valid['Bowl_Score'] = (z_wkts * (w['bowl_wkts']/bowl_tot)) + (z_econ * (w['bowl_econ']/bowl_tot)) + (z_avg_bowl * (w['bowl_avg']/bowl_tot)) + (z_bowl_sr * (w['bowl_sr']/bowl_tot)) + (z_extras * (w['bowl_extras']/bowl_tot))
+    valid['Bowl_Score'] = (z_wkts * (w['bowl_wkts']/bowl_tot)) + (z_econ * (w['bowl_econ']/bowl_tot)) + (z_avg_bowl * (w['bowl_avg']/bowl_tot)) + (z_bowl_sr * (w['bowl_sr']/bowl_tot)) + (z_extras * (w['bowl_extras']/bowl_tot)) + (z_dots * (w.get('bowl_dots', 10.0)/bowl_tot))
     valid['Boundary_Score'] = z_bound 
+    valid['Dot_Score'] = z_dots
 
     valid['Role'] = valid.apply(lambda r: 'All-Rounder' if r['Balls_Faced'] >= 15 and r['Balls_Bowled'] >= 18 else ('Bowler' if r['Balls_Bowled'] >= 18 else 'Batter'), axis=1)
     
@@ -370,33 +384,25 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w, valid_players=No
         valid['Rtg_MinMax'] = 20.0
         valid['Rtg_Pct'] = 20.0
     else:
-        # Strict ranking to prevent decimal ties
         ranks = valid['Final_Raw'].rank(method='first', ascending=True)
         mid_rank = (n_players + 1) / 2.0
         
-        # Dual-Anchor Scale: Top = 30.0, Median = 15.5, Bottom = 10.0
         def compute_dual_anchor(r):
             if r >= mid_rank:
-                if n_players == mid_rank:
-                    return 30.0
+                if n_players == mid_rank: return 30.0
                 return 15.5 + 14.5 * ((r - mid_rank) / (n_players - mid_rank))
             else:
-                if mid_rank == 1.0:
-                    return 10.0
+                if mid_rank == 1.0: return 10.0
                 return 10.0 + 5.5 * ((r - 1.0) / (mid_rank - 1.0))
                 
         valid['AI Rating'] = ranks.apply(compute_dual_anchor).clip(lower=10.0, upper=30.0).round(1)
         
-        # Linear Min-Max (Bottom = 10.0, Top = 30.0)
         min_raw = valid['Final_Raw'].min()
         max_raw = valid['Final_Raw'].max()
-        if max_raw == min_raw:
-            valid['Rtg_MinMax'] = 20.0
-        else:
-            valid['Rtg_MinMax'] = 10.0 + ((valid['Final_Raw'] - min_raw) / (max_raw - min_raw)) * 20.0
+        if max_raw == min_raw: valid['Rtg_MinMax'] = 20.0
+        else: valid['Rtg_MinMax'] = 10.0 + ((valid['Final_Raw'] - min_raw) / (max_raw - min_raw)) * 20.0
         valid['Rtg_MinMax'] = valid['Rtg_MinMax'].clip(lower=10.0, upper=30.0).round(1)
         
-        # Uniform Percentile (10.0 to 30.0)
         pct_ranks = valid['Final_Raw'].rank(method='first', pct=True)
         valid['Rtg_Pct'] = 10.0 + (pct_ranks * 20.0)
         valid['Rtg_Pct'] = valid['Rtg_Pct'].clip(lower=10.0, upper=30.0).round(1)
@@ -404,13 +410,10 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w, valid_players=No
     for col, new_col in [('Bat_Score', 'Bat_Rating'), ('Bowl_Score', 'Bowl_Rating'), ('Fielding_Score', 'Field_Rating')]:
         c_min = valid[col].min()
         c_max = valid[col].max()
-        if c_max == c_min:
-            valid[new_col] = 15.0
-        else:
-            valid[new_col] = 10.0 + ((valid[col] - c_min) / (c_max - c_min)) * 20.0
+        if c_max == c_min: valid[new_col] = 15.0
+        else: valid[new_col] = 10.0 + ((valid[col] - c_min) / (c_max - c_min)) * 20.0
         valid[new_col] = valid[new_col].clip(lower=10.0, upper=30.0).round(1)
 
-    # Tiers aligned with the 15.5 median
     valid['Tier'] = pd.cut(valid['AI Rating'], bins=[-1, 13.9, 19.9, 25.9, 31], labels=["Bronze", "Silver", "Gold", "Platinum"])
     return valid
 
@@ -452,14 +455,14 @@ if not master_df.empty:
         else:
             master_df[col] = master_df[col].fillna(0.0)
         
-    radar_cols = ['Bat_Score', 'Boundary_Score', 'Bowl_Score', 'Fielding_Score']
+    radar_cols = ['Bat_Score', 'Boundary_Score', 'Bowl_Score', 'Fielding_Score', 'Dot_Score']
     for col in radar_cols:
         if col not in master_df.columns:
             master_df[col] = 0.0
         else:
             master_df[col] = master_df[col].fillna(0.0)
             
-    stat_cols = ['Runs_bat', 'Balls_Faced', 'Bat Avg', 'SR_bat', 'Boundary_Pct', 'Wkts', 'Overs', 'Bowl Avg', 'Bowl SR', 'Econ', 'Extras_Rate', 'Total_Fielding']
+    stat_cols = ['Runs_bat', 'Balls_Faced', 'Bat Avg', 'SR_bat', 'Boundary_Pct', 'Wkts', 'Overs', 'Bowl Avg', 'Bowl SR', 'Econ', 'Dot_Pct', 'Extras_Rate', 'Total_Fielding']
     for c in stat_cols:
         if c not in master_df.columns:
             master_df[c] = 0.0
@@ -538,7 +541,7 @@ with tab1:
         col_order = [
             'Player', 'Data Source', 'Role', 'Tier', 'Pool Status',
             'Runs_bat', 'Balls_Faced', 'Bat Avg', 'SR_bat', 'Boundary_Pct',
-            'Wkts', 'Overs', 'Bowl Avg', 'Bowl SR', 'Econ', 'Extras_Rate',
+            'Wkts', 'Overs', 'Bowl Avg', 'Bowl SR', 'Econ', 'Dot_Pct', 'Extras_Rate',
             'Total_Fielding', 'Bat_Rating', 'Bowl_Rating', 'Field_Rating', 
             'AI Rating', 'Rtg_MinMax', 'Rtg_Pct'
         ] + auth_users + ['Avg Scout Score', 'Scout Override', 'Final Scout Rating', 'Draft Status']
@@ -548,7 +551,7 @@ with tab1:
         new_columns = [
             'Player', 'Data Source', 'Role', 'Tier', 'Pool Status',
             'Runs', 'Balls Faced', 'Bat Avg', 'Bat SR', 'Bound %',
-            'Wkts', 'Overs', 'Bowl Avg', 'Bowl SR', 'Econ', 'Extras/Ov',
+            'Wkts', 'Overs', 'Bowl Avg', 'Bowl SR', 'Econ', 'Dot %', 'Extras/Ov',
             'Fielding', 'Bat Rtg', 'Bowl Rtg', 'Field Rtg', 
             'AI Rating', 'Rtg (MinMax)', 'Rtg (Pct)'
         ] + auth_users + ['Avg Scout Score', 'Scout Override', 'Final Scout Rating', 'Draft Status']
@@ -559,7 +562,7 @@ with tab1:
         fmt_dict = {
             'Runs': '{:.0f}', 'Balls Faced': '{:.0f}', 'Wkts': '{:.0f}', 'Overs': '{:.1f}', 'Fielding': '{:.0f}',
             'Bat Avg': '{:.2f}', 'Bat SR': '{:.1f}', 'Bound %': '{:.1f}%',
-            'Bowl Avg': '{:.2f}', 'Bowl SR': '{:.1f}', 'Econ': '{:.2f}', 'Extras/Ov': '{:.2f}',
+            'Bowl Avg': '{:.2f}', 'Bowl SR': '{:.1f}', 'Econ': '{:.2f}', 'Dot %': '{:.1f}%', 'Extras/Ov': '{:.2f}',
             'Bat Rtg': '{:.1f}', 'Bowl Rtg': '{:.1f}', 'Field Rtg': '{:.1f}',
             'AI Rating': '{:.1f}', 'Rtg (MinMax)': '{:.1f}', 'Rtg (Pct)': '{:.1f}', 
             'Avg Scout Score': '{:.1f}', 'Scout Override': '{:.1f}', 'Final Scout Rating': '{:.1f}'
@@ -772,7 +775,7 @@ with tab4:
                 
                 st.markdown("---")
                 st.markdown(f"**Total Runs:** {int(p_data['Runs_bat'])} *(Balls Faced: {int(p_data['Balls_Faced'])}, Avg: {p_data['Bat Avg']:.2f}, SR: {p_data['SR_bat']:.1f}, Bound %: {p_data['Boundary_Pct']:.1f}%)*")
-                st.markdown(f"**Total Wkts:** {int(p_data['Wkts'])} *(Overs: {p_data['Overs']:.1f}, Avg: {p_data['Bowl Avg']:.2f}, SR: {p_data['Bowl SR']:.1f}, Econ: {p_data['Econ']:.2f})*")
+                st.markdown(f"**Total Wkts:** {int(p_data['Wkts'])} *(Overs: {p_data['Overs']:.1f}, Dots: {p_data['Dot_Pct']:.1f}%, Avg: {p_data['Bowl Avg']:.2f}, SR: {p_data['Bowl SR']:.1f}, Econ: {p_data['Econ']:.2f})*")
                 st.markdown(f"**Fielding Dismissals:** {int(p_data['Total_Fielding'])}")
                 
                 st.markdown("---")
@@ -786,7 +789,7 @@ with tab4:
                             st.write(f"- **{evaluator} ({data.get('Final', 0):.1f})** | *{data.get('Role')} | Bat: {data.get('Bat')}, Bowl: {data.get('Bowl')}, Field: {data.get('Field')}*")
 
             with pc2:
-                categories = ['Batting Volume', 'Strike Rate', 'Boundary Threat', 'Wicket Taking', 'Economy (Reversed)', 'Bowling Discipline', 'Fielding Impact']
+                categories = ['Batting Volume', 'Strike Rate', 'Boundary Threat', 'Wicket Taking', 'Economy (Reversed)', 'Bowling Discipline', 'Dot Pressure', 'Fielding Impact']
                 
                 bat_max = master_df['Bat_Score'].max()
                 bat_min = master_df['Bat_Score'].min()
@@ -814,15 +817,19 @@ with tab4:
                 r_disc = 1 - ((p_data['Extras_Rate'] - ext_min) / (ext_max - ext_min + 0.01)) if ext_max != ext_min else 0.5
                 if p_data['Extras_Rate'] == 0 and ext_max == 0: r_disc = 1
                 
+                dot_max = master_df['Dot_Score'].max()
+                dot_min = master_df['Dot_Score'].min()
+                r_dots = (p_data['Dot_Score'] - dot_min) / (dot_max - dot_min + 0.01) if dot_max != dot_min else 0.5
+                
                 fld_max = master_df['Fielding_Score'].max()
                 fld_min = master_df['Fielding_Score'].min()
                 r_field = (p_data['Fielding_Score'] - fld_min) / (fld_max - fld_min + 0.01) if fld_max != fld_min else 0.5
                 
                 fig = go.Figure()
                 fig.add_trace(go.Scatterpolar(
-                    r=[r_bat, r_sr, r_bound, r_bowl, r_econ, r_disc, r_field, r_bat], theta=categories + [categories[0]], fill='toself', line_color='orange'
+                    r=[r_bat, r_sr, r_bound, r_bowl, r_econ, r_disc, r_dots, r_field, r_bat], theta=categories + [categories[0]], fill='toself', line_color='orange'
                 ))
-                fig.update_layout(polar=dict(radialaxis=dict(visible=False, range=[0, 1])), showlegend=False, title="Skill Heptagon")
+                fig.update_layout(polar=dict(radialaxis=dict(visible=False, range=[0, 1])), showlegend=False, title="Skill Octagon")
                 st.plotly_chart(fig, use_container_width=True)
 
 # --- TAB 5: COMMITTEE RATINGS ---
@@ -1030,7 +1037,7 @@ with tab6:
 
     ### 3. Core Granular Metrics
     *   **Batting Score:** Total Runs ({w['bat_runs']}%), Batting Avg ({w['bat_avg']}%), Strike Rate ({w['bat_sr']}%), Balls Per Dismissal ({w['bat_bpd']}%), and Boundary Impact ({w['bat_bound']}%).
-    *   **Bowling Score:** Total Wickets ({w['bowl_wkts']}%), Economy Rate ({w['bowl_econ']}%), Bowling Avg ({w['bowl_avg']}%), Bowling Strike Rate ({w['bowl_sr']}%), and Extras/Discipline Penalty ({w['bowl_extras']}%).
+    *   **Bowling Score:** Total Wickets ({w['bowl_wkts']}%), Economy Rate ({w['bowl_econ']}%), Bowling Avg ({w['bowl_avg']}%), Bowling Strike Rate ({w['bowl_sr']}%), Dot Ball % ({w.get('bowl_dots', 10.0)}%), and Extras/Discipline Penalty ({w['bowl_extras']}%).
     *   **Fielding Score:** The sum of all Catches, Run-Outs, and Stumpings.
     """)
 
@@ -1147,12 +1154,13 @@ with tab7:
         w_bat_bound = b5.number_input("Boundary %", value=float(algo_weights["bat_bound"]))
         
         st.markdown("##### ⚾ Bowling Metrics (%)")
-        bo1, bo2, bo3, bo4, bo5 = st.columns(5)
+        bo1, bo2, bo3, bo4, bo5, bo6 = st.columns(6)
         w_bowl_wkts = bo1.number_input("Total Wickets", value=float(algo_weights["bowl_wkts"]))
         w_bowl_econ = bo2.number_input("Economy", value=float(algo_weights["bowl_econ"]))
         w_bowl_avg = bo3.number_input("Bowling Avg", value=float(algo_weights["bowl_avg"]))
         w_bowl_sr = bo4.number_input("Bowling SR", value=float(algo_weights["bowl_sr"]))
-        w_bowl_extras = bo5.number_input("Extras Penalty", value=float(algo_weights["bowl_extras"]))
+        w_bowl_dots = bo5.number_input("Dot Ball %", value=float(algo_weights.get("bowl_dots", 10.0)))
+        w_bowl_extras = bo6.number_input("Extras Penalty", value=float(algo_weights["bowl_extras"]))
         
         st.markdown("##### ⚖️ Role Distribution (%) & Multiplier")
         r1, r2, r3 = st.columns(3)
@@ -1175,7 +1183,7 @@ with tab7:
             new_weights = {
                 "squad_size": w_squad_size, "team_budget": w_team_budget,
                 "bat_runs": w_bat_runs, "bat_avg": w_bat_avg, "bat_sr": w_bat_sr, "bat_bpd": w_bat_bpd, "bat_bound": w_bat_bound,
-                "bowl_wkts": w_bowl_wkts, "bowl_econ": w_bowl_econ, "bowl_avg": w_bowl_avg, "bowl_sr": w_bowl_sr, "bowl_extras": w_bowl_extras,
+                "bowl_wkts": w_bowl_wkts, "bowl_econ": w_bowl_econ, "bowl_avg": w_bowl_avg, "bowl_sr": w_bowl_sr, "bowl_dots": w_bowl_dots, "bowl_extras": w_bowl_extras,
                 "wt_batter_bat": w_wt_batter_bat, "wt_batter_field": w_wt_batter_field,
                 "wt_bowler_bowl": w_wt_bowler_bowl, "wt_bowler_field": w_wt_bowler_field,
                 "wt_ar_bat": w_wt_ar_bat, "wt_ar_bowl": w_wt_ar_bowl, "wt_ar_field": w_wt_ar_field, "ar_multiplier": w_ar_multiplier
