@@ -423,7 +423,7 @@ if not master_df.empty:
         else:
             master_df[col] = master_df[col].fillna(0.0)
             
-    stat_cols = ['Runs_bat', 'Bat Avg', 'SR_bat', 'Boundary_Pct', 'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 'Extras_Rate', 'Total_Fielding']
+    stat_cols = ['Runs_bat', 'Balls_Faced', 'Bat Avg', 'SR_bat', 'Boundary_Pct', 'Wkts', 'Overs', 'Bowl Avg', 'Bowl SR', 'Econ', 'Extras_Rate', 'Total_Fielding']
     for c in stat_cols:
         if c not in master_df.columns:
             master_df[c] = 0.0
@@ -501,8 +501,8 @@ with tab1:
 
         col_order = [
             'Player', 'Data Source', 'Role', 'Tier', 'Pool Status',
-            'Runs_bat', 'Bat Avg', 'SR_bat', 'Boundary_Pct',
-            'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 'Extras_Rate',
+            'Runs_bat', 'Balls_Faced', 'Bat Avg', 'SR_bat', 'Boundary_Pct',
+            'Wkts', 'Overs', 'Bowl Avg', 'Bowl SR', 'Econ', 'Extras_Rate',
             'Total_Fielding', 'Bat_Rating', 'Bowl_Rating', 'Field_Rating', 
             'AI Rating', 'Rtg_MinMax', 'Rtg_Pct'
         ] + auth_users + ['Avg Scout Score', 'Scout Override', 'Final Scout Rating', 'Draft Status']
@@ -511,8 +511,8 @@ with tab1:
         
         new_columns = [
             'Player', 'Data Source', 'Role', 'Tier', 'Pool Status',
-            'Runs', 'Bat Avg', 'Bat SR', 'Bound %',
-            'Wkts', 'Bowl Avg', 'Bowl SR', 'Econ', 'Extras/Ov',
+            'Runs', 'Balls Faced', 'Bat Avg', 'Bat SR', 'Bound %',
+            'Wkts', 'Overs', 'Bowl Avg', 'Bowl SR', 'Econ', 'Extras/Ov',
             'Fielding', 'Bat Rtg', 'Bowl Rtg', 'Field Rtg', 
             'AI Rating', 'Rtg (MinMax)', 'Rtg (Pct)'
         ] + auth_users + ['Avg Scout Score', 'Scout Override', 'Final Scout Rating', 'Draft Status']
@@ -521,7 +521,7 @@ with tab1:
         disp_df = disp_df.set_index('Player')
         
         fmt_dict = {
-            'Runs': '{:.0f}', 'Wkts': '{:.0f}', 'Fielding': '{:.0f}',
+            'Runs': '{:.0f}', 'Balls Faced': '{:.0f}', 'Wkts': '{:.0f}', 'Overs': '{:.1f}', 'Fielding': '{:.0f}',
             'Bat Avg': '{:.2f}', 'Bat SR': '{:.1f}', 'Bound %': '{:.1f}%',
             'Bowl Avg': '{:.2f}', 'Bowl SR': '{:.1f}', 'Econ': '{:.2f}', 'Extras/Ov': '{:.2f}',
             'Bat Rtg': '{:.1f}', 'Bowl Rtg': '{:.1f}', 'Field Rtg': '{:.1f}',
@@ -734,8 +734,8 @@ with tab4:
                 st.markdown(f"**Drafted To:** {p_data['Draft Status']}")
                 
                 st.markdown("---")
-                st.markdown(f"**Total Runs:** {int(p_data['Runs_bat'])} *(Avg: {p_data['Bat Avg']:.2f}, SR: {p_data['SR_bat']:.1f}, Bound %: {p_data['Boundary_Pct']:.1f}%)*")
-                st.markdown(f"**Total Wkts:** {int(p_data['Wkts'])} *(Avg: {p_data['Bowl Avg']:.2f}, SR: {p_data['Bowl SR']:.1f}, Econ: {p_data['Econ']:.2f})*")
+                st.markdown(f"**Total Runs:** {int(p_data['Runs_bat'])} *(Balls Faced: {int(p_data['Balls_Faced'])}, Avg: {p_data['Bat Avg']:.2f}, SR: {p_data['SR_bat']:.1f}, Bound %: {p_data['Boundary_Pct']:.1f}%)*")
+                st.markdown(f"**Total Wkts:** {int(p_data['Wkts'])} *(Overs: {p_data['Overs']:.1f}, Avg: {p_data['Bowl Avg']:.2f}, SR: {p_data['Bowl SR']:.1f}, Econ: {p_data['Econ']:.2f})*")
                 st.markdown(f"**Fielding Dismissals:** {int(p_data['Total_Fielding'])}")
                 
                 st.markdown("---")
@@ -992,7 +992,7 @@ with tab6:
     ### 3. Core Granular Metrics
     *   **Batting Score:** Total Runs ({w['bat_runs']}%), Batting Avg ({w['bat_avg']}%), Strike Rate ({w['bat_sr']}%), Balls Per Dismissal ({w['bat_bpd']}%), and Boundary Impact ({w['bat_bound']}%).
     *   **Bowling Score:** Total Wickets ({w['bowl_wkts']}%), Economy Rate ({w['bowl_econ']}%), Bowling Avg ({w['bowl_avg']}%), Bowling Strike Rate ({w['bowl_sr']}%), and Extras/Discipline Penalty ({w['bowl_extras']}%).
-    *   **Fielding Score:** Catches, Run-Outs, and Stumpings.
+    *   **Fielding Score:** The sum of all Catches, Run-Outs, and Stumpings.
     """)
 
 # --- TAB 7: ADMIN & DATA ---
@@ -1085,6 +1085,7 @@ with tab7:
         st.write("Modify the mathematical importance of each metric, or configure the Salary Cap.")
         
         st.markdown("##### 🎯 Salary Cap Rules")
+        st.write("*(Changes made here save instantly and reflect in the Draft Room!)*")
         sc1, sc2, sc3 = st.columns(3)
         w_squad_size = sc1.number_input("Max Players Per Team", value=int(algo_weights.get("squad_size", 11)), step=1, key="cap_squad", on_change=update_cap_settings)
         w_team_budget = sc2.number_input("Team Point Budget", value=float(algo_weights.get("team_budget", 240.0)), step=5.0, key="cap_budget", on_change=update_cap_settings)
@@ -1162,17 +1163,20 @@ with tab7:
 
         st.markdown("---")
         st.markdown("### 7. 💾 Permanent Cloud Backup & Restore")
+        st.write("Because free servers reset when code changes, download your server state to save your mappings and rosters permanently.")
+        
         bc1, bc2 = st.columns(2)
         with bc1:
             backup_data = {
-                "mappings": load_json(MAPPING_FILE, DEFAULT_MAPPINGS),
-                "draft": load_json(DRAFT_FILE, {}),
-                "ratings": load_json(RATINGS_FILE, {}),
-                "weights": load_json(WEIGHTS_FILE, DEFAULT_WEIGHTS),
-                "leadership": load_json(LEADERSHIP_FILE, {}),
-                "pool": load_json(POOL_FILE, {}),
-                "overrides": load_json(OVERRIDES_FILE, {}),
-                "config": load_json(CONFIG_FILE, DEFAULT_CONFIG)
+                "mappings": saved_mapping,
+                "draft": draft_state,
+                "ratings": human_ratings,
+                "weights": algo_weights,
+                "leadership": leadership_state,
+                "pool": pool_state,
+                "overrides": scout_overrides,
+                "config": app_config,
+                "users": auth_users
             }
             backup_json = json.dumps(backup_data, indent=2).encode('utf-8')
             st.download_button(
@@ -1187,13 +1191,20 @@ with tab7:
             restore_file = st.file_uploader("📤 Restore from Backup (.json)", type=["json"])
             if restore_file:
                 restore_data = json.load(restore_file)
-                if "mappings" in restore_data: save_json(MAPPING_FILE, restore_data.get("mappings", {}))
-                if "draft" in restore_data: save_json(DRAFT_FILE, restore_data.get("draft", {}))
-                if "ratings" in restore_data: save_json(RATINGS_FILE, restore_data.get("ratings", {}))
-                if "weights" in restore_data: save_json(WEIGHTS_FILE, restore_data.get("weights", {}))
-                if "leadership" in restore_data: save_json(LEADERSHIP_FILE, restore_data.get("leadership", {}))
-                if "pool" in restore_data: save_json(POOL_FILE, restore_data.get("pool", {}))
-                if "overrides" in restore_data: save_json(OVERRIDES_FILE, restore_data.get("overrides", {}))
-                if "config" in restore_data: save_json(CONFIG_FILE, restore_data.get("config", {}))
-                st.success("✅ Server state fully restored!")
+                
+                # Check if it's a raw ratings dump vs full server backup
+                if "ratings" not in restore_data and any(isinstance(v, dict) for v in restore_data.values()):
+                    save_json(RATINGS_FILE, restore_data)
+                    st.success("✅ Raw human ratings file detected and restored!")
+                else:
+                    if "mappings" in restore_data: save_json(MAPPING_FILE, restore_data.get("mappings", {}))
+                    if "draft" in restore_data: save_json(DRAFT_FILE, restore_data.get("draft", {}))
+                    if "ratings" in restore_data: save_json(RATINGS_FILE, restore_data.get("ratings", {}))
+                    if "weights" in restore_data: save_json(WEIGHTS_FILE, restore_data.get("weights", {}))
+                    if "leadership" in restore_data: save_json(LEADERSHIP_FILE, restore_data.get("leadership", {}))
+                    if "pool" in restore_data: save_json(POOL_FILE, restore_data.get("pool", {}))
+                    if "overrides" in restore_data: save_json(OVERRIDES_FILE, restore_data.get("overrides", {}))
+                    if "config" in restore_data: save_json(CONFIG_FILE, restore_data.get("config", {}))
+                    if "users" in restore_data: save_json(USERS_FILE, restore_data.get("users", []))
+                    st.success("✅ Server state fully restored!")
                 st.rerun()
