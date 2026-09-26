@@ -609,8 +609,7 @@ with tab2:
                 draft_state.clear()
                 save_json(DRAFT_FILE, draft_state)
                 push_state_to_gsheets()
-                if "live_grid" in st.session_state:
-                    del st.session_state["live_grid"]
+                st.session_state["primary_grid_version"] = st.session_state.get("primary_grid_version", 0) + 1
                 st.rerun()
         
         valid_teams = [t for t in TEAMS if t != "Available"]
@@ -683,7 +682,8 @@ with tab2:
         rtg_cols = [f"{t} Rtg" for t in valid_teams]
         styled_grid = grid_df.style.background_gradient(subset=rtg_cols, cmap='RdYlGn', vmin=0, vmax=30).format({c: "{:.1f}" for c in rtg_cols}, na_rep="")
 
-        edited_grid = st.data_editor(styled_grid, column_config=col_config, use_container_width=True, key="live_grid")
+        primary_grid_key = f"live_grid_{st.session_state.get('primary_grid_version', 0)}"
+        edited_grid = st.data_editor(styled_grid, column_config=col_config, use_container_width=True, key=primary_grid_key)
 
         grid_changed = False
         for t in valid_teams:
@@ -730,7 +730,7 @@ with tab2:
                 for p in t_players: new_draft_state[p] = t
 
             if has_error:
-                if "live_grid" in st.session_state: del st.session_state["live_grid"]
+                st.session_state["primary_grid_version"] = st.session_state.get("primary_grid_version", 0) + 1
                 st.rerun()
             else:
                 save_json(DRAFT_FILE, new_draft_state)
@@ -759,8 +759,7 @@ with tab2:
                 save_json(DRAFT_LEVEL_FILE, draft_state_level)
                 save_json(DRAFT_LOCKS_LEVEL_FILE, draft_locks_level)
                 push_state_to_gsheets()
-                if "live_grid_level" in st.session_state:
-                    del st.session_state["live_grid_level"]
+                st.session_state["level_grid_version"] = st.session_state.get("level_grid_version", 0) + 1
                 st.rerun()
         
         default_cum = [30, 54, 78, 101, 124, 145, 166, 185, 204, 214, 228]
@@ -809,11 +808,12 @@ with tab2:
 
         styled_level_grid = level_grid_df.style.background_gradient(subset=rtg_cols, cmap='RdYlGn', vmin=0, vmax=30).format({c: "{:.1f}" for c in rtg_cols}, na_rep="")
         
-        # 70% / 30% Layout Split to give the non-scrollable table enough room
+        # 70% / 30% Non-scrollable layout
         c_left, c_right = st.columns([7, 3])
         with c_left:
             st.markdown("#### Selection Board")
-            edited_level_grid = st.data_editor(styled_level_grid, column_config=level_col_config, use_container_width=True, key="live_grid_level")
+            level_grid_key = f"live_grid_level_{st.session_state.get('level_grid_version', 0)}"
+            edited_level_grid = st.data_editor(styled_level_grid, column_config=level_col_config, use_container_width=True, key=level_grid_key)
 
         with c_right:
             st.markdown("#### Remainings Table")
@@ -865,11 +865,18 @@ with tab2:
                 
                 new_draft_locks_level[t][i] = new_lock
                 
+                if old_lock and old_val != new_val:
+                    level_grid_changed = True
+                    st.session_state.draft_error_level = f"❌ REJECTED: Slot for {t} in Rnd {i+1} is locked! Unlock it first."
+                    has_error = True
+                
+                if new_lock and not new_val:
+                    level_grid_changed = True
+                    st.session_state.draft_error_level = f"❌ CANNOT LOCK: Slot for {t} in Rnd {i+1} is empty! Select a player first."
+                    has_error = True
+
                 if old_val != new_val:
                     level_grid_changed = True
-                    if old_lock:
-                        st.session_state.draft_error_level = f"❌ REJECTED: Slot for {t} in Rnd {i+1} is locked! Unlock it first."
-                        has_error = True
                 
                 if old_lock != new_lock:
                     level_grid_changed = True
@@ -891,13 +898,13 @@ with tab2:
                         is_final_round = (i == squad_size - 1)
                         
                         if t_spent_round > cum_limits[i] and not is_final_round:
-                            st.session_state.draft_error_level = f"❌ LEVEL CAP EXCEEDED: {t} exceeded the Rnd {i+1} cumulative limit of {cum_limits[i]} (Spent: {t_spent_round:.1f})! Edit reverted."
+                            st.session_state.draft_error_level = f"❌ LEVEL CAP EXCEEDED: {t} cannot pick {clean_name} in Rnd {i+1}! Cumulative spent would be {t_spent_round:.1f} pts, exceeding the limit of {cum_limits[i]:.1f} pts."
                             has_error = True
                             break
                         
                         new_lock = new_draft_locks_level[t][i]
                         if new_lock and t_spent_round > cum_limits[i] and not is_final_round:
-                            st.session_state.draft_error_level = f"❌ CANNOT LOCK: {t} does not have sufficient points available in Rnd {i+1} to lock this player! (Spent: {t_spent_round:.1f} / Limit: {cum_limits[i]}). Edit reverted."
+                            st.session_state.draft_error_level = f"❌ CANNOT LOCK: {t} does not have sufficient points available in Rnd {i+1} to lock this player! (Spent: {t_spent_round:.1f} / Limit: {cum_limits[i]:.1f})."
                             has_error = True
                             break
                             
@@ -911,7 +918,7 @@ with tab2:
                     for p in t_players: new_draft_state_level[p] = t
 
             if has_error:
-                if "live_grid_level" in st.session_state: del st.session_state["live_grid_level"]
+                st.session_state["level_grid_version"] = st.session_state.get("level_grid_version", 0) + 1
                 st.rerun()
             else:
                 save_json(DRAFT_LEVEL_FILE, new_draft_state_level)
