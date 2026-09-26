@@ -15,6 +15,7 @@ st.set_page_config(page_title="BPL Cricket", layout="wide", page_icon="🏏")
 DATA_FILE = "current_stats.xlsx"
 MAPPING_FILE = "name_mapping.json"
 DRAFT_FILE = "draft_state.json"
+DRAFT_LEVEL_FILE = "draft_state_level.json"
 RATINGS_FILE = "human_ratings.json"
 USERS_FILE = "authorized_users.json"
 WEIGHTS_FILE = "algo_weights.json"
@@ -45,7 +46,8 @@ DEFAULT_CONFIG = {
     "gsheet_url": "https://docs.google.com/spreadsheets/d/16j0UEOr_DN-kDNjyFt65IxJxnuEWjyto4o_4ShA4SN0/edit?resourcekey=&gid=436661694#gid=436661694",
     "gsheet_col": "Full Name",
     "gsheet_pool_col": "How do you want to play?",
-    "teams": ["Team 1", "Team 2", "Team 3", "Team 4", "Team 5"]
+    "teams": ["Team 1", "Team 2", "Team 3", "Team 4", "Team 5"],
+    "level_limits": [23, 22, 21, 20, 19, 18, 17, 16, 15]
 }
 
 # --- HELPER FUNCTIONS ---
@@ -92,6 +94,7 @@ def attempt_gsheets_restore():
                     except: continue
                     if key == "mappings": save_json(MAPPING_FILE, val)
                     elif key == "draft": save_json(DRAFT_FILE, val)
+                    elif key == "draft_level": save_json(DRAFT_LEVEL_FILE, val)
                     elif key == "ratings": save_json(RATINGS_FILE, val)
                     elif key == "weights": save_json(WEIGHTS_FILE, val)
                     elif key == "leadership": save_json(LEADERSHIP_FILE, val)
@@ -117,6 +120,7 @@ for original, merged in DEFAULT_MAPPINGS.items():
         mapping_changed = True
 
 draft_state = load_json(DRAFT_FILE, {}) 
+draft_state_level = load_json(DRAFT_LEVEL_FILE, {})
 leadership_state = load_json(LEADERSHIP_FILE, {})
 pool_state = load_json(POOL_FILE, {})
 human_ratings = load_json(RATINGS_FILE, {}) 
@@ -133,7 +137,7 @@ def push_state_to_gsheets():
         url = app_config.get("gsheet_url", DEFAULT_CONFIG["gsheet_url"])
         
         backup_data = {
-            "mappings": saved_mapping, "draft": draft_state, "ratings": human_ratings,
+            "mappings": saved_mapping, "draft": draft_state, "draft_level": draft_state_level, "ratings": human_ratings,
             "weights": algo_weights, "leadership": leadership_state, "pool": pool_state,
             "overrides": scout_overrides, "config": app_config, "users": auth_users
         }
@@ -192,55 +196,39 @@ def get_raw_live_roster(url, col_name, pool_col_name):
             return res
         return pd.DataFrame()
     except Exception as e:
-        if "429" in str(e):
-            st.warning("⚠️ Google Sheets API rate limit reached (429). Displaying cached roster data. Please wait 1 minute before syncing again.")
-        else:
-            st.warning(f"⚠️ Could not refresh live roster: {e}")
-            
-        if "last_valid_roster" in st.session_state:
-            return st.session_state["last_valid_roster"]
         return pd.DataFrame()
 
 @st.cache_data(show_spinner="Reading Excel File (Only happens once)...")
 def get_raw_excel_data(file_mod_time):
     if not os.path.exists(DATA_FILE): return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), []
-    try:
-        xls = pd.ExcelFile(DATA_FILE)
-    except Exception:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), []
+    try: xls = pd.ExcelFile(DATA_FILE)
+    except: return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), []
         
     bat_dfs, bowl_dfs, field_dfs = [], [], []
     raw_names = set()
     
     for s in xls.sheet_names:
         header_idx = 1 if 'practice' in s.lower() else 0
-        try:
-            df = pd.read_excel(xls, sheet_name=s, header=header_idx)
-        except Exception:
-            continue
+        try: df = pd.read_excel(xls, sheet_name=s, header=header_idx)
+        except: continue
         df.columns = [clean_col_name(c) for c in df.columns]
         if 'Player' in df.columns:
             df['Player'] = df['Player'].apply(clean_prefix)
             raw_names.update(df['Player'].dropna().unique())
-            
             if 'bat' in s.lower(): bat_dfs.append(df)
             elif 'bowl' in s.lower(): bowl_dfs.append(df)
             
             f_cols = [c for c in df.columns if any(x in c.lower() for x in ['catch', 'run out', 'stump', 'fielding'])]
-            if f_cols:
-                f_df = df[['Player'] + f_cols].copy()
-                field_dfs.append(f_df)
+            if f_cols: field_dfs.append(df[['Player'] + f_cols].copy())
 
     raw_bat = pd.concat(bat_dfs, ignore_index=True) if bat_dfs else pd.DataFrame()
     raw_bowl = pd.concat(bowl_dfs, ignore_index=True) if bowl_dfs else pd.DataFrame()
     raw_field = pd.concat(field_dfs, ignore_index=True) if field_dfs else pd.DataFrame()
-    
     return raw_bat, raw_bowl, raw_field, sorted(list(raw_names))
 
 @st.cache_data(show_spinner="Crunching AI Ratings with Custom Weights...")
 def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w, valid_players=None):
     if raw_bat.empty and raw_bowl.empty: return pd.DataFrame()
-    
     rbat, rbowl, rfield = raw_bat.copy(), raw_bowl.copy(), raw_field.copy()
 
     if not rbat.empty: rbat['Player'] = rbat['Player'].map(mapping).fillna(rbat['Player'])
@@ -256,25 +244,16 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w, valid_players=No
 
     fours_col = next((c for c in rbat.columns if str(c).lower().strip() in ['4s', 'fours', '4', "4's"]), None)
     sixes_col = next((c for c in rbat.columns if str(c).lower().strip() in ['6s', 'sixes', '6', "6's"]), None)
-
-    for col in ['Runs', 'SR', 'Inns', 'NO']:
-        rbat[col] = pd.to_numeric(rbat.get(col, 0), errors='coerce').fillna(0)
-    
+    for col in ['Runs', 'SR', 'Inns', 'NO']: rbat[col] = pd.to_numeric(rbat.get(col, 0), errors='coerce').fillna(0)
     if fours_col: rbat[fours_col] = pd.to_numeric(rbat[fours_col], errors='coerce').fillna(0)
     if sixes_col: rbat[sixes_col] = pd.to_numeric(rbat[sixes_col], errors='coerce').fillna(0)
         
     rbat['Balls_Faced'] = np.where(rbat['SR'] > 0, (rbat['Runs'] / rbat['SR']) * 100, 0)
     rbat['Dismissals'] = (rbat['Inns'] - rbat['NO']).clip(lower=0)
     
-    bat_agg_kwargs = {
-        'Inns': ('Inns', 'sum'),
-        'Runs_bat': ('Runs', 'sum'),
-        'Balls_Faced': ('Balls_Faced', 'sum'),
-        'Dismissals': ('Dismissals', 'sum')
-    }
+    bat_agg_kwargs = {'Inns': ('Inns', 'sum'), 'Runs_bat': ('Runs', 'sum'), 'Balls_Faced': ('Balls_Faced', 'sum'), 'Dismissals': ('Dismissals', 'sum')}
     if fours_col: bat_agg_kwargs['Fours'] = (fours_col, 'sum')
     if sixes_col: bat_agg_kwargs['Sixes'] = (sixes_col, 'sum')
-    
     agg_bat = rbat.groupby('Player').agg(**bat_agg_kwargs).reset_index()
 
     extras = np.zeros(len(rbowl))
@@ -288,22 +267,16 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w, valid_players=No
             if cl in ['wd', 'wide', 'wides', 'nb', 'no ball', 'noballs', 'no balls']:
                 extras += pd.to_numeric(rbowl[col], errors='coerce').fillna(0).values
         rbowl['Total_Extras'] = extras
-
-        for col in ['Runs', 'Wkts', 'Overs', 'Total_Extras']:
-            rbowl[col] = pd.to_numeric(rbowl.get(col, 0), errors='coerce').fillna(0)
+        for col in ['Runs', 'Wkts', 'Overs', 'Total_Extras']: rbowl[col] = pd.to_numeric(rbowl.get(col, 0), errors='coerce').fillna(0)
         rbowl['Balls_Bowled'] = rbowl['Overs'].apply(overs_to_balls)
         
-        agg_bowl = rbowl.groupby('Player').agg(
-            Balls_Bowled=('Balls_Bowled', 'sum'), Runs_bowl=('Runs', 'sum'), Wkts=('Wkts', 'sum'), 
-            Total_Extras=('Total_Extras', 'sum'), Dots=('Dots', 'sum')
-        ).reset_index()
+        agg_bowl = rbowl.groupby('Player').agg(Balls_Bowled=('Balls_Bowled', 'sum'), Runs_bowl=('Runs', 'sum'), Wkts=('Wkts', 'sum'), Total_Extras=('Total_Extras', 'sum'), Dots=('Dots', 'sum')).reset_index()
     else:
         agg_bowl = pd.DataFrame(columns=['Player', 'Balls_Bowled', 'Runs_bowl', 'Wkts', 'Total_Extras', 'Dots'])
 
     if not rfield.empty:
         for col in rfield.columns:
-            if col not in ['Player']: 
-                rfield[col] = pd.to_numeric(rfield[col], errors='coerce').fillna(0)
+            if col not in ['Player']: rfield[col] = pd.to_numeric(rfield[col], errors='coerce').fillna(0)
         rfield['Total_Fielding'] = rfield.drop(columns=['Player'], errors='ignore').sum(axis=1)
         agg_field = rfield.groupby('Player').agg(Total_Fielding=('Total_Fielding', 'sum')).reset_index()
     else:
@@ -340,7 +313,6 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w, valid_players=No
     valid['Sm_Avg'] = (valid['Runs_bat'] + (mean_avg * 3)) / (valid['Dismissals'] + 3)
     valid['Sm_SR'] = ((valid['Runs_bat'] + ((valid['Runs_bat'].sum() / (valid['Balls_Faced'].sum() or 1) * 100) / 100 * 30)) / (valid['Balls_Faced'] + 30)) * 100
     valid['Sm_BPD'] = (valid['Balls_Faced'] + (mean_bpd * 3)) / (valid['Dismissals'] + 3)
-    
     league_bound_pct = valid['Bound_Runs'].sum() / (valid['Runs_bat'].sum() or 1)
     valid['Sm_Boundary'] = ((valid['Bound_Runs'] + (league_bound_pct * 50)) / (valid['Runs_bat'] + 50)) * 100
     
@@ -430,19 +402,15 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w, valid_players=No
 
 file_time = os.path.getmtime(DATA_FILE) if os.path.exists(DATA_FILE) else 0
 
-# --- FETCH RAW NAMES FROM BOTH SOURCES ---
 raw_bat_cache, raw_bowl_cache, raw_field_cache, all_raw_names = get_raw_excel_data(file_time)
 raw_live_df = get_raw_live_roster(app_config.get("gsheet_url"), app_config.get("gsheet_col"), app_config.get("gsheet_pool_col"))
 raw_live_names = raw_live_df['Raw_Name'].tolist() if not raw_live_df.empty else []
 
-# --- GOOGLE SHEET LIVE INTEGRATION & MASTER DF BUILD ---
 if not raw_live_df.empty:
     raw_live_df['Player'] = raw_live_df['Raw_Name'].map(lambda x: saved_mapping.get(x, x))
     roster_df = raw_live_df.groupby('Player').last().reset_index()[['Player', 'Form_Pool_Status']]
     registered_players = tuple(roster_df['Player'].tolist())
-    
     excel_master_df = calculate_ratings(raw_bat_cache, raw_bowl_cache, raw_field_cache, saved_mapping, algo_weights, valid_players=registered_players)
-    
     if not excel_master_df.empty:
         master_df = pd.merge(roster_df, excel_master_df, on="Player", how="left", indicator=True)
         master_df['Data Source'] = np.where(master_df['_merge'] == 'left_only', 'Form Only (Rookie)', 'Form & Excel')
@@ -457,28 +425,21 @@ else:
         master_df['Form_Pool_Status'] = "Team Player"
         master_df['Data Source'] = 'Excel Only'
 
-# --- IMPENETRABLE GUARDRAILS (Guarantees no missing columns or NaN crashes) ---
 if not master_df.empty:
     default_rating_cols = ['AI Rating', 'Rtg_MinMax', 'Rtg_Pct', 'Bat_Rating', 'Bowl_Rating', 'Field_Rating']
     for col in default_rating_cols:
-        if col not in master_df.columns:
-            master_df[col] = 0.0
-        else:
-            master_df[col] = master_df[col].fillna(0.0)
+        if col not in master_df.columns: master_df[col] = 0.0
+        else: master_df[col] = master_df[col].fillna(0.0)
         
     radar_cols = ['Bat_Score', 'Boundary_Score', 'Bowl_Score', 'Fielding_Score', 'Dot_Score']
     for col in radar_cols:
-        if col not in master_df.columns:
-            master_df[col] = 0.0
-        else:
-            master_df[col] = master_df[col].fillna(0.0)
+        if col not in master_df.columns: master_df[col] = 0.0
+        else: master_df[col] = master_df[col].fillna(0.0)
             
     stat_cols = ['Runs_bat', 'Balls_Faced', 'Bat Avg', 'SR_bat', 'Boundary_Pct', 'Wkts', 'Overs', 'Bowl Avg', 'Bowl SR', 'Econ', 'Dot_Pct', 'Extras_Rate', 'Total_Fielding']
     for c in stat_cols:
-        if c not in master_df.columns:
-            master_df[c] = 0.0
-        else:
-            master_df[c] = master_df[c].fillna(0.0)
+        if c not in master_df.columns: master_df[c] = 0.0
+        else: master_df[c] = master_df[c].fillna(0.0)
 
     if 'Role' not in master_df.columns: master_df['Role'] = 'Batter'
     master_df['Role'] = master_df['Role'].fillna('Batter')
@@ -490,8 +451,7 @@ if not master_df.empty:
     
     def determine_pool_status(row):
         admin_override = pool_state.get(row['Player'])
-        if admin_override:
-            return admin_override
+        if admin_override: return admin_override
         return row.get('Form_Pool_Status', 'Team Player')
         
     master_df['Pool Status'] = master_df.apply(determine_pool_status, axis=1)
@@ -502,7 +462,6 @@ if not master_df.empty:
     master_df['Avg Scout Score'] = master_df[auth_users].mean(axis=1)
     master_df['Scout Override'] = master_df['Player'].apply(lambda x: scout_overrides.get(x, np.nan))
     
-    # Priority cascade: Scout Override -> Avg Scout -> AI Rating -> 0.0
     master_df['Final Scout Rating'] = (
         master_df['Scout Override']
         .combine_first(master_df['Avg Scout Score'])
@@ -599,7 +558,7 @@ with tab2:
     if master_df.empty:
         st.info("Data required.")
     else:
-        st.subheader("🎯 Team Selection & Salary Cap")
+        st.subheader("🎯 Primary Team Selection (Total Cap)")
         st.caption("All draft values, budgets, and grid cells are powered by the **Final Scout Rating**.")
         
         squad_size = int(algo_weights.get("squad_size", 11))
@@ -607,18 +566,9 @@ with tab2:
         
         valid_teams = [t for t in TEAMS if t != "Available"]
         num_teams = len(valid_teams)
-        drafted_df = master_df[master_df['Draft Status'] != "Available"]
-        num_drafted = len(drafted_df)
         
-        round_num = (num_drafted // num_teams) + 1 if num_teams > 0 else 1
-        pick_in_round = num_drafted % num_teams if num_teams > 0 else 0
-        if (round_num % 2) != 0:
-            on_the_clock = valid_teams[pick_in_round] if num_teams > 0 else "None"
-        else:
-            on_the_clock = valid_teams[num_teams - 1 - pick_in_round] if num_teams > 0 else "None"
-            
-        st.markdown("---")
-        st.markdown(f"### 🟢 ON THE CLOCK: **{on_the_clock}** (Round {round_num}, Pick {pick_in_round + 1})")
+        # --- GRID 1 (Total Budget) ---
+        drafted_df = master_df[master_df['Draft Status'] != "Available"]
         
         st.markdown("#### 💰 Franchise Cap & Roster Summary")
         sum_df = pd.DataFrame(index=["Total Points Burnt", "Total Players Added", "Total Points Allocated", "Remaining Points", "Players yet to take"])
@@ -644,15 +594,11 @@ with tab2:
                         style_df.at["Remaining Points", c] = 'background-color: #d4edda; color: #155724; font-weight: bold;' if rem_val >= 0 else 'background-color: #f8d7da; color: #721c24; font-weight: bold;'
                         style_df.at["Total Points Burnt", c] = 'background-color: #fff3cd; color: #856404; font-weight: bold;'
                         style_df.at["Total Points Allocated", c] = 'background-color: #e2e3e5; color: #383d41;'
-                    except:
-                        pass
+                    except: pass
             return style_df
 
         st.dataframe(sum_df.style.apply(color_summary, axis=None), use_container_width=True)
 
-        st.markdown("#### 📋 Official Team Selection Grid")
-        st.write("Click an empty cell to pick a player. If you need to remove someone, select **`--- CLEAR PICK ---`**.")
-        
         if "draft_error" in st.session_state:
             st.error(st.session_state.draft_error)
             del st.session_state.draft_error
@@ -668,7 +614,6 @@ with tab2:
                 if i < squad_size:
                     mapped_string = player_to_string_map.get(p_name, p_name)
                     grid_df.iat[i, grid_df.columns.get_loc(t)] = mapped_string
-                    
                     p_match = master_df[master_df['Player'] == p_name]
                     if not p_match.empty:
                         grid_df.iat[i, grid_df.columns.get_loc(f"{t} Rtg")] = float(p_match.iloc[0]['Final Scout Rating'])
@@ -680,12 +625,8 @@ with tab2:
         for t in valid_teams:
             t_drafted = [p for p, team in draft_state.items() if team == t]
             t_drafted_opts = [player_to_string_map.get(p, p) for p in t_drafted]
-            
             opts = ["--- CLEAR PICK ---"] + t_drafted_opts + avail_opts
-            
-            # THE FIX: Removed the " Name" text so the column header perfectly matches the Team Configuration.
             col_config[t] = st.column_config.SelectboxColumn(t, options=opts, required=False)
-            
             col_config[f"{t} Rtg"] = st.column_config.Column("Scout Rating", disabled=True)
 
         rtg_cols = [f"{t} Rtg" for t in valid_teams]
@@ -705,7 +646,6 @@ with tab2:
         if grid_changed:
             has_error = False
             new_draft_state = draft_state.copy()
-            
             for t in valid_teams:
                 for p, team in list(new_draft_state.items()):
                     if team == t: del new_draft_state[p]
@@ -743,6 +683,132 @@ with tab2:
                 st.rerun()
             else:
                 save_json(DRAFT_FILE, new_draft_state)
+                push_state_to_gsheets()
+                st.rerun()
+
+
+        st.markdown("---")
+        
+        # --- GRID 2 (Level-Wise Logic) ---
+        st.subheader("🎯 Level-Wise Team Selection (Round Limits)")
+        st.caption("This grid uses **Final Scout Ratings** and enforces cumulative limits at each round (configured in the Admin Tab).")
+        
+        base_limits = [30, 24]
+        custom_limits = app_config.get("level_limits", [23, 22, 21, 20, 19, 18, 17, 16, 15])
+        all_limits = base_limits + custom_limits
+        
+        cum_limits = []
+        current_cum = 0
+        for val in all_limits:
+            current_cum += val
+            cum_limits.append(current_cum)
+            
+        while len(cum_limits) < squad_size:
+            current_cum += 15 
+            cum_limits.append(current_cum)
+            
+        if "draft_error_level" in st.session_state:
+            st.error(st.session_state.draft_error_level)
+            del st.session_state.draft_error_level
+
+        level_grid_df = pd.DataFrame(index=[f"Round {i+1}" for i in range(squad_size)])
+        for t in valid_teams:
+            level_grid_df[t] = ""
+            level_grid_df[f"{t} Rtg"] = np.nan
+
+        for t in valid_teams:
+            t_players = [p for p, team in draft_state_level.items() if team == t]
+            for i, p_name in enumerate(t_players):
+                if i < squad_size:
+                    mapped_string = player_to_string_map.get(p_name, p_name)
+                    level_grid_df.iat[i, level_grid_df.columns.get_loc(t)] = mapped_string
+                    p_match = master_df[master_df['Player'] == p_name]
+                    if not p_match.empty:
+                        level_grid_df.iat[i, level_grid_df.columns.get_loc(f"{t} Rtg")] = float(p_match.iloc[0]['Final Scout Rating'])
+
+        avail_team_players_lvl = master_df[(master_df['Pool Status'] == "Team Player")].sort_values('Final Scout Rating', ascending=False)
+        avail_opts_lvl = [player_to_string_map[row['Player']] for _, row in avail_team_players_lvl.iterrows()]
+
+        level_col_config = {}
+        for t in valid_teams:
+            opts = ["--- CLEAR PICK ---"] + avail_opts_lvl
+            level_col_config[t] = st.column_config.SelectboxColumn(t, options=opts, required=False)
+            level_col_config[f"{t} Rtg"] = st.column_config.Column("Scout Rating", disabled=True)
+
+        styled_level_grid = level_grid_df.style.background_gradient(subset=rtg_cols, cmap='RdYlGn', vmin=0, vmax=30).format({c: "{:.1f}" for c in rtg_cols}, na_rep="")
+        
+        c_left, c_right = st.columns([6, 4])
+        with c_left:
+            st.markdown("#### Selection Board")
+            edited_level_grid = st.data_editor(styled_level_grid, column_config=level_col_config, use_container_width=True, key="live_grid_level")
+
+        with c_right:
+            st.markdown("#### Remainings Table")
+            rem_df = pd.DataFrame(index=[f"Round {i+1}" for i in range(squad_size)])
+            for t in valid_teams:
+                rem_df[t] = 0.0
+            rem_df["Level wise"] = [cum_limits[i] for i in range(squad_size)]
+
+            for t in valid_teams:
+                running_spent = 0.0
+                for i in range(squad_size):
+                    val = edited_level_grid.iat[i, edited_level_grid.columns.get_loc(t)]
+                    clean_name = string_to_player_map.get(val, "")
+                    p_match = master_df[master_df['Player'] == clean_name]
+                    if not p_match.empty:
+                        running_spent += float(p_match.iloc[0]['Final Scout Rating'])
+                    rem_df.iat[i, rem_df.columns.get_loc(t)] = cum_limits[i] - running_spent
+
+            def style_remainings(val):
+                if isinstance(val, (int, float)):
+                    if val < 0: return 'background-color: #f8d7da; color: #721c24;'
+                return ''
+            
+            st.dataframe(rem_df.style.format("{:.1f}").map(style_remainings, subset=valid_teams), use_container_width=True)
+
+        level_grid_changed = False
+        for t in valid_teams:
+            for i in range(squad_size):
+                old_val = level_grid_df.iat[i, level_grid_df.columns.get_loc(t)]
+                new_val = edited_level_grid.iat[i, edited_level_grid.columns.get_loc(t)]
+                if old_val != new_val:
+                    level_grid_changed = True
+                    break
+
+        if level_grid_changed:
+            has_error = False
+            new_draft_state_level = draft_state_level.copy()
+            
+            for t in valid_teams:
+                for p, team in list(new_draft_state_level.items()):
+                    if team == t: del new_draft_state_level[p]
+                
+                t_players = []
+                for i in range(squad_size):
+                    val = edited_level_grid.iat[i, edited_level_grid.columns.get_loc(t)]
+                    clean_name = string_to_player_map.get(val, "")
+                    if clean_name: t_players.append(clean_name)
+                    
+                    t_spent_round = sum([master_df[master_df['Player'] == p]['Final Scout Rating'].iloc[0] for p in t_players if p in master_df['Player'].values])
+                    if t_spent_round > cum_limits[i]:
+                        st.session_state.draft_error_level = f"❌ LEVEL CAP EXCEEDED: {t} exceeded the Round {i+1} cumulative limit of {cum_limits[i]} (Spent: {t_spent_round:.1f})! Edit reverted."
+                        has_error = True
+                        break
+                        
+                if has_error: break
+                
+                if len(t_players) != len(set(t_players)):
+                    st.session_state.draft_error_level = f"❌ REJECTED: Duplicate pick detected for {t}."
+                    has_error = True
+                    break
+                    
+                for p in t_players: new_draft_state_level[p] = t
+
+            if has_error:
+                if "live_grid_level" in st.session_state: del st.session_state["live_grid_level"]
+                st.rerun()
+            else:
+                save_json(DRAFT_LEVEL_FILE, new_draft_state_level)
                 push_state_to_gsheets()
                 st.rerun()
 
@@ -1118,10 +1184,30 @@ with tab7:
                 st.error("Please enter at least one team name.")
 
         st.markdown("---")
+        
+        st.markdown("### 📊 3. Level-Wise Draft Limits (Rounds 3+)")
+        st.write("Rounds 1 and 2 are fixed at 30 and 24 points respectively. Enter the points allowed for each subsequent round (comma-separated).")
+        
+        default_level_limits = app_config.get("level_limits", [23, 22, 21, 20, 19, 18, 17, 16, 15])
+        limits_str = ", ".join(map(str, default_level_limits))
+        new_limits_str = st.text_input("Custom Marginal Limits (e.g. 23, 22, 21...)", value=limits_str)
+        
+        if st.button("💾 Save Level-Wise Limits"):
+            try:
+                parsed_limits = [int(x.strip()) for x in new_limits_str.split(",") if x.strip()]
+                app_config["level_limits"] = parsed_limits
+                save_json(CONFIG_FILE, app_config)
+                push_state_to_gsheets()
+                st.success("✅ Level-wise limits updated for the duplicate draft grid.")
+                st.rerun()
+            except ValueError:
+                st.error("Please enter valid integers separated by commas.")
+
+        st.markdown("---")
 
         ac1, ac2 = st.columns(2)
         with ac1:
-            st.markdown("**3. Setup Rosters, Leadership & Player Pool**")
+            st.markdown("**4. Setup Rosters, Leadership & Player Pool**")
             st.caption("Assign Captains and toggle whether a player is eligible for the draft (Team Player) or held in reserve (Pool Player).")
             if not master_df.empty:
                 draft_df = pd.DataFrame({
@@ -1156,7 +1242,7 @@ with tab7:
                 st.info("Upload data or connect Google Sheet first.")
 
         with ac2:
-            st.markdown("**4. Authorized Evaluators**")
+            st.markdown("**5. Authorized Evaluators**")
             users_text = st.text_area("List names (comma separated)", ", ".join(auth_users))
             if st.button("Update Evaluators"):
                 new_users = [u.strip() for u in users_text.split(",")]
@@ -1166,7 +1252,7 @@ with tab7:
                 st.rerun()
             
             st.markdown("---")
-            st.markdown("**5. Data File Upload**")
+            st.markdown("**6. Data File Upload**")
             uploaded_file = st.file_uploader("Upload Raw Historical Stats (.xlsx)", type=["xlsx"])
             if uploaded_file:
                 with open(DATA_FILE, "wb") as f: f.write(uploaded_file.getbuffer())
@@ -1174,7 +1260,7 @@ with tab7:
                 st.rerun()
 
         st.markdown("---")
-        st.markdown("### 6. 🎛️ Draft & Algorithm Settings")
+        st.markdown("### 7. 🎛️ Draft & Algorithm Settings")
         st.write("Modify the mathematical importance of each metric, or configure the Salary Cap.")
         
         st.markdown("##### 🎯 Salary Cap Rules")
@@ -1238,7 +1324,7 @@ with tab7:
             st.rerun()
 
         st.markdown("---")
-        st.markdown("### 7. 🛠️ Player Name Aliases & Merge Tool")
+        st.markdown("### 8. 🛠️ Player Name Aliases & Merge Tool")
         st.write("Edit the **'Merged Name'** column to fuse mismatched names from your Google Form and Excel sheet.")
         
         all_possible_names = sorted(list(set(all_raw_names + raw_live_names)))
@@ -1258,7 +1344,7 @@ with tab7:
             st.info("Upload an Excel file or connect a Google Sheet to start mapping names.")
 
         st.markdown("---")
-        st.markdown("### 8. 💾 Permanent Cloud Backup & Restore")
+        st.markdown("### 9. 💾 Permanent Cloud Backup & Restore")
         st.write("Legacy local file download and restore.")
         
         bc1, bc2 = st.columns(2)
@@ -1266,6 +1352,7 @@ with tab7:
             backup_data = {
                 "mappings": saved_mapping,
                 "draft": draft_state,
+                "draft_level": draft_state_level,
                 "ratings": human_ratings,
                 "weights": algo_weights,
                 "leadership": leadership_state,
@@ -1294,6 +1381,7 @@ with tab7:
                 else:
                     if "mappings" in restore_data: save_json(MAPPING_FILE, restore_data.get("mappings", {}))
                     if "draft" in restore_data: save_json(DRAFT_FILE, restore_data.get("draft", {}))
+                    if "draft_level" in restore_data: save_json(DRAFT_LEVEL_FILE, restore_data.get("draft_level", {}))
                     if "ratings" in restore_data: save_json(RATINGS_FILE, restore_data.get("ratings", {}))
                     if "weights" in restore_data: save_json(WEIGHTS_FILE, restore_data.get("weights", {}))
                     if "leadership" in restore_data: save_json(LEADERSHIP_FILE, restore_data.get("leadership", {}))
@@ -1306,7 +1394,7 @@ with tab7:
                 st.rerun()
                 
         st.markdown("---")
-        st.markdown("### 9. ☁️ Google Sheets Database Sync")
+        st.markdown("### 10. ☁️ Google Sheets Database Sync")
         st.write("Turn your Google Sheet into a permanent database! **Important:** You must create a blank tab named exactly `System_State` in your Google Sheet, and your Streamlit Secrets must contain your Service Account JSON.")
         
         gs_1, gs_2 = st.columns(2)
@@ -1331,6 +1419,7 @@ with tab7:
                                 
                                 if key == "mappings": save_json(MAPPING_FILE, val)
                                 elif key == "draft": save_json(DRAFT_FILE, val)
+                                elif key == "draft_level": save_json(DRAFT_LEVEL_FILE, val)
                                 elif key == "ratings": save_json(RATINGS_FILE, val)
                                 elif key == "weights": save_json(WEIGHTS_FILE, val)
                                 elif key == "leadership": save_json(LEADERSHIP_FILE, val)
