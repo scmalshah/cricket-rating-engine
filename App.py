@@ -785,7 +785,7 @@ with tab2:
 
         styled_level_grid = level_grid_df.style.background_gradient(subset=rtg_cols, cmap='RdYlGn', vmin=0, vmax=30).format({c: "{:.1f}" for c in rtg_cols}, na_rep="")
         
-        c_left, c_right = st.columns([6, 4])
+        c_left, c_right = st.columns([3, 1])
         with c_left:
             st.markdown("#### Selection Board")
             edited_level_grid = st.data_editor(styled_level_grid, column_config=level_col_config, use_container_width=True, key="live_grid_level")
