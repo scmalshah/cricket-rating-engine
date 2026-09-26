@@ -652,7 +652,7 @@ with tab2:
             st.error(st.session_state.draft_error)
             del st.session_state.draft_error
 
-        grid_df = pd.DataFrame(index=[f"Round {i+1}" for i in range(squad_size)])
+        grid_df = pd.DataFrame(index=[f"Rnd {i+1}" for i in range(squad_size)])
         for t in valid_teams:
             grid_df[t] = ""
             grid_df[f"{t} Rtg"] = np.nan
@@ -775,7 +775,7 @@ with tab2:
             st.error(st.session_state.draft_error_level)
             del st.session_state.draft_error_level
 
-        level_grid_df = pd.DataFrame(index=[f"Round {i+1}" for i in range(squad_size)])
+        level_grid_df = pd.DataFrame(index=[f"Rnd {i+1}" for i in range(squad_size)])
         for t in valid_teams:
             level_grid_df[t] = ""
             level_grid_df[f"{t} 🔒"] = draft_locks_level[t]
@@ -809,14 +809,15 @@ with tab2:
 
         styled_level_grid = level_grid_df.style.background_gradient(subset=rtg_cols, cmap='RdYlGn', vmin=0, vmax=30).format({c: "{:.1f}" for c in rtg_cols}, na_rep="")
         
-        c_left, c_right = st.columns([4, 1])
+        # 70% / 30% Layout Split to give the non-scrollable table enough room
+        c_left, c_right = st.columns([7, 3])
         with c_left:
             st.markdown("#### Selection Board")
             edited_level_grid = st.data_editor(styled_level_grid, column_config=level_col_config, use_container_width=True, key="live_grid_level")
 
         with c_right:
             st.markdown("#### Remainings Table")
-            rem_df = pd.DataFrame(index=[f"Round {i+1}" for i in range(squad_size)])
+            rem_df = pd.DataFrame(index=[f"Rnd {i+1}" for i in range(squad_size)])
             for t in valid_teams: rem_df[t] = 0.0
             rem_df["Level wise"] = cum_limits
 
@@ -867,7 +868,7 @@ with tab2:
                 if old_val != new_val:
                     level_grid_changed = True
                     if old_lock:
-                        st.session_state.draft_error_level = f"❌ REJECTED: Slot for {t} in Round {i+1} is locked! Unlock it first."
+                        st.session_state.draft_error_level = f"❌ REJECTED: Slot for {t} in Rnd {i+1} is locked! Unlock it first."
                         has_error = True
                 
                 if old_lock != new_lock:
@@ -890,13 +891,13 @@ with tab2:
                         is_final_round = (i == squad_size - 1)
                         
                         if t_spent_round > cum_limits[i] and not is_final_round:
-                            st.session_state.draft_error_level = f"❌ LEVEL CAP EXCEEDED: {t} exceeded the Round {i+1} cumulative limit of {cum_limits[i]} (Spent: {t_spent_round:.1f})! Edit reverted."
+                            st.session_state.draft_error_level = f"❌ LEVEL CAP EXCEEDED: {t} exceeded the Rnd {i+1} cumulative limit of {cum_limits[i]} (Spent: {t_spent_round:.1f})! Edit reverted."
                             has_error = True
                             break
                         
                         new_lock = new_draft_locks_level[t][i]
                         if new_lock and t_spent_round > cum_limits[i] and not is_final_round:
-                            st.session_state.draft_error_level = f"❌ CANNOT LOCK: {t} does not have sufficient points available in Round {i+1} to lock this player! (Spent: {t_spent_round:.1f} / Limit: {cum_limits[i]}). Edit reverted."
+                            st.session_state.draft_error_level = f"❌ CANNOT LOCK: {t} does not have sufficient points available in Rnd {i+1} to lock this player! (Spent: {t_spent_round:.1f} / Limit: {cum_limits[i]}). Edit reverted."
                             has_error = True
                             break
                             
