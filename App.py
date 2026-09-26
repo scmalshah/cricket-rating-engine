@@ -506,7 +506,7 @@ if not master_df.empty:
         .combine_first(master_df['Avg Scout Score'])
         .combine_first(master_df['AI Rating'])
         .fillna(0.0)
-        .round(1)
+        .round(0).astype(int)
     )
 
 player_to_string_map = {}
@@ -514,7 +514,7 @@ string_to_player_map = {"--- CLEAR PICK ---": "", "": ""}
 
 if not master_df.empty:
     for _, row in master_df.iterrows():
-        disp_string = f"{row['Player']} ({row['Final Scout Rating']:.1f})"
+        disp_string = f"{row['Player']} ({int(row['Final Scout Rating'])})"
         player_to_string_map[row['Player']] = disp_string
         string_to_player_map[disp_string] = row['Player']
 
@@ -582,7 +582,7 @@ with tab1:
             'Bowl Avg': '{:.2f}', 'Bowl SR': '{:.1f}', 'Econ': '{:.2f}', 'Dot %': '{:.1f}%', 'Extras/Ov': '{:.2f}',
             'Bat Rtg': '{:.1f}', 'Bowl Rtg': '{:.1f}', 'Field Rtg': '{:.1f}',
             'AI Rating': '{:.1f}', 'Rtg (MinMax)': '{:.1f}', 'Rtg (Pct)': '{:.1f}', 
-            'Avg Scout Score': '{:.1f}', 'Scout Override': '{:.1f}', 'Final Scout Rating': '{:.1f}'
+            'Avg Scout Score': '{:.1f}', 'Scout Override': '{:.1f}', 'Final Scout Rating': '{:.0f}'
         }
         for u in auth_users:
             fmt_dict[u] = '{:.1f}'
@@ -630,7 +630,7 @@ with tab2:
             
             sum_df[t] = ["", "", "", "", ""]
             sum_df[f"{t} Rtg"] = [
-                f"{spent:.1f}", str(players_added), f"{team_budget:.1f}", f"{rem:.1f}", str(players_needed)
+                f"{int(spent)}", str(players_added), f"{int(team_budget)}", f"{int(rem)}", str(players_needed)
             ]
             
         def color_summary(df):
@@ -664,7 +664,7 @@ with tab2:
                     grid_df.iat[i, grid_df.columns.get_loc(t)] = mapped_string
                     p_match = master_df[master_df['Player'] == p_name]
                     if not p_match.empty:
-                        grid_df.iat[i, grid_df.columns.get_loc(f"{t} Rtg")] = float(p_match.iloc[0]['Final Scout Rating'])
+                        grid_df.iat[i, grid_df.columns.get_loc(f"{t} Rtg")] = int(p_match.iloc[0]['Final Scout Rating'])
 
         drafted_primary_players = list(draft_state.keys())
 
@@ -680,7 +680,7 @@ with tab2:
             col_config[f"{t} Rtg"] = st.column_config.Column("Scout Rating", disabled=True)
 
         rtg_cols = [f"{t} Rtg" for t in valid_teams]
-        styled_grid = grid_df.style.background_gradient(subset=rtg_cols, cmap='RdYlGn', vmin=0, vmax=30).format({c: "{:.1f}" for c in rtg_cols}, na_rep="")
+        styled_grid = grid_df.style.background_gradient(subset=rtg_cols, cmap='RdYlGn', vmin=0, vmax=30).format({c: "{:.0f}" for c in rtg_cols}, na_rep="")
 
         primary_grid_key = f"live_grid_{st.session_state.get('primary_grid_version', 0)}"
         edited_grid = st.data_editor(styled_grid, column_config=col_config, use_container_width=True, key=primary_grid_key)
@@ -717,13 +717,13 @@ with tab2:
                 t_count = len(t_players)
                 
                 if t_spent > team_budget:
-                    st.session_state.draft_error = f"❌ SALARY CAP EXCEEDED: {t} cannot afford this roster ({t_spent:.1f} / {team_budget:.1f} pts)! Edit reverted."
+                    st.session_state.draft_error = f"❌ SALARY CAP EXCEEDED: {t} cannot afford this roster ({int(t_spent)} / {int(team_budget)} pts)! Edit reverted."
                     has_error = True
                     break
 
                 if t_rem < (0.0 * (squad_size - t_count)):
                     min_req = 0.0 * (squad_size - t_count)
-                    st.session_state.draft_error = f"❌ INVALID ROSTER: {t} must save {min_req:.1f} points for remaining slots. Edit reverted."
+                    st.session_state.draft_error = f"❌ INVALID ROSTER: {t} must save {int(min_req)} points for remaining slots. Edit reverted."
                     has_error = True
                     break
                     
@@ -788,7 +788,7 @@ with tab2:
                     level_grid_df.iat[i, level_grid_df.columns.get_loc(t)] = mapped_string
                     p_match = master_df[master_df['Player'] == p_name]
                     if not p_match.empty:
-                        level_grid_df.iat[i, level_grid_df.columns.get_loc(f"{t} Rtg")] = float(p_match.iloc[0]['Final Scout Rating'])
+                        level_grid_df.iat[i, level_grid_df.columns.get_loc(f"{t} Rtg")] = int(p_match.iloc[0]['Final Scout Rating'])
 
         drafted_level_players = list(draft_state_level.keys())
         level_col_config = {}
@@ -806,7 +806,7 @@ with tab2:
             level_col_config[f"{t} 🔒"] = st.column_config.CheckboxColumn("🔒", default=False)
             level_col_config[f"{t} Rtg"] = st.column_config.Column("Scout Rating", disabled=True)
 
-        styled_level_grid = level_grid_df.style.background_gradient(subset=rtg_cols, cmap='RdYlGn', vmin=0, vmax=30).format({c: "{:.1f}" for c in rtg_cols}, na_rep="")
+        styled_level_grid = level_grid_df.style.background_gradient(subset=rtg_cols, cmap='RdYlGn', vmin=0, vmax=30).format({c: "{:.0f}" for c in rtg_cols}, na_rep="")
         
         # 70% / 30% Non-scrollable layout
         c_left, c_right = st.columns([7, 3])
@@ -828,7 +828,7 @@ with tab2:
                     clean_name = string_to_player_map.get(val, "")
                     p_match = master_df[master_df['Player'] == clean_name]
                     if not p_match.empty:
-                        running_spent += float(p_match.iloc[0]['Final Scout Rating'])
+                        running_spent += int(p_match.iloc[0]['Final Scout Rating'])
                     rem_df.iat[i, rem_df.columns.get_loc(t)] = cum_limits[i] - running_spent
 
             def style_remainings(val):
@@ -839,7 +839,7 @@ with tab2:
             rem_col_config = {"Level wise": st.column_config.NumberColumn("Level wise", min_value=0, step=1)}
             for t in valid_teams: rem_col_config[t] = st.column_config.NumberColumn(t, disabled=True)
                 
-            fmt_rem = {t: "{:.1f}" for t in valid_teams}
+            fmt_rem = {t: "{:.0f}" for t in valid_teams}
             styled_rem = rem_df.style.format(fmt_rem, na_rep="").map(style_remainings, subset=valid_teams)
             edited_rem = st.data_editor(styled_rem, column_config=rem_col_config, use_container_width=True, key="rem_grid_level")
             
@@ -893,18 +893,18 @@ with tab2:
                         clean_name = string_to_player_map.get(val, "")
                         if clean_name: t_players.append(clean_name)
                         
-                        t_spent_round = sum([master_df[master_df['Player'] == p]['Final Scout Rating'].iloc[0] for p in t_players if p in master_df['Player'].values])
+                        t_spent_round = sum([int(master_df[master_df['Player'] == p]['Final Scout Rating'].iloc[0]) for p in t_players if p in master_df['Player'].values])
                         
                         is_final_round = (i == squad_size - 1)
                         
                         if t_spent_round > cum_limits[i] and not is_final_round:
-                            st.session_state.draft_error_level = f"❌ LEVEL CAP EXCEEDED: {t} cannot pick {clean_name} in Rnd {i+1}! Cumulative spent would be {t_spent_round:.1f} pts, exceeding the limit of {cum_limits[i]:.1f} pts."
+                            st.session_state.draft_error_level = f"❌ LEVEL CAP EXCEEDED: {t} cannot pick {clean_name} in Rnd {i+1}! Cumulative spent would be {int(t_spent_round)} pts, exceeding the limit of {int(cum_limits[i])} pts."
                             has_error = True
                             break
                         
                         new_lock = new_draft_locks_level[t][i]
                         if new_lock and t_spent_round > cum_limits[i] and not is_final_round:
-                            st.session_state.draft_error_level = f"❌ CANNOT LOCK: {t} does not have sufficient points available in Rnd {i+1} to lock this player! (Spent: {t_spent_round:.1f} / Limit: {cum_limits[i]:.1f})."
+                            st.session_state.draft_error_level = f"❌ CANNOT LOCK: {t} does not have sufficient points available in Rnd {i+1} to lock this player! (Spent: {int(t_spent_round)} / Limit: {int(cum_limits[i])})."
                             has_error = True
                             break
                             
@@ -958,7 +958,7 @@ with tab3:
             fig2 = px.bar(team_stats, x='Draft Status', y='Total_Scout_Rating', title="Total Team Power Score (Scout Rating)", color='Draft Status')
             c2.plotly_chart(fig2, use_container_width=True)
             
-            st.dataframe(team_stats.style.format({'Avg_Scout_Rating': "{:.1f}", 'Total_Scout_Rating': "{:.1f}", 'Total_AI_Rating': "{:.1f}"}), use_container_width=True)
+            st.dataframe(team_stats.style.format({'Avg_Scout_Rating': "{:.1f}", 'Total_Scout_Rating': "{:.0f}", 'Total_AI_Rating': "{:.1f}"}), use_container_width=True)
 
 # --- TAB 4: PLAYER PROFILES ---
 with tab4:
@@ -980,7 +980,7 @@ with tab4:
                 
                 st.markdown("---")
                 st.markdown("#### Evaluations")
-                st.markdown(f"**Final Scout Rating (Draft Cost):** `{p_data['Final Scout Rating']:.1f}` *(Used in Draft & Salary Cap)*")
+                st.markdown(f"**Final Scout Rating (Draft Cost):** `{int(p_data['Final Scout Rating'])}` *(Used in Draft & Salary Cap)*")
                 st.markdown(f"**AI Rating:** `{p_data['AI Rating']:.1f}` *(Dual-Anchor: Top=30.0, Median=15.5)*")
                 st.markdown(f"**Drafted To:** {p_data['Draft Status']}")
                 
@@ -1393,7 +1393,7 @@ with tab7:
             valid_teams_ct = len([t for t in TEAMS if t != "Available"])
             ideal_pool = master_df[(master_df['Pool Status'] == "Team Player") & (master_df['Final Scout Rating'] > 0)].sort_values('Final Scout Rating', ascending=False).head(valid_teams_ct * w_squad_size)
             suggested_cap = ideal_pool['Final Scout Rating'].sum() / valid_teams_ct if valid_teams_ct > 0 else 0.0
-            sc3.info(f"**Suggested Cap:** {suggested_cap:.1f} pts\n\n*(Based on top {valid_teams_ct * w_squad_size} Team Players by Final Scout Rating)*")
+            sc3.info(f"**Suggested Cap:** {int(suggested_cap)} pts\n\n*(Based on top {valid_teams_ct * w_squad_size} Team Players by Final Scout Rating)*")
         
         st.markdown("##### 🏏 Batting Metrics (%)")
         b1, b2, b3, b4, b5 = st.columns(5)
