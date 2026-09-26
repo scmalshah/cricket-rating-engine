@@ -47,7 +47,7 @@ DEFAULT_CONFIG = {
     "gsheet_col": "Full Name",
     "gsheet_pool_col": "How do you want to play?",
     "teams": ["Team 1", "Team 2", "Team 3", "Team 4", "Team 5"],
-    "level_limits": [23, 22, 21, 20, 19, 18, 17, 16, 15]
+    "level_wise_limits": [30, 54, 78, 101, 124, 145, 166, 185, 204, 214, 228]
 }
 
 # --- HELPER FUNCTIONS ---
@@ -196,6 +196,13 @@ def get_raw_live_roster(url, col_name, pool_col_name):
             return res
         return pd.DataFrame()
     except Exception as e:
+        if "429" in str(e):
+            st.warning("⚠️ Google Sheets API rate limit reached (429). Displaying cached roster data. Please wait 1 minute before syncing again.")
+        else:
+            st.warning(f"⚠️ Could not refresh live roster: {e}")
+            
+        if "last_valid_roster" in st.session_state:
+            return st.session_state["last_valid_roster"]
         return pd.DataFrame()
 
 @st.cache_data(show_spinner="Reading Excel File (Only happens once)...")
@@ -244,6 +251,7 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w, valid_players=No
 
     fours_col = next((c for c in rbat.columns if str(c).lower().strip() in ['4s', 'fours', '4', "4's"]), None)
     sixes_col = next((c for c in rbat.columns if str(c).lower().strip() in ['6s', 'sixes', '6', "6's"]), None)
+
     for col in ['Runs', 'SR', 'Inns', 'NO']: rbat[col] = pd.to_numeric(rbat.get(col, 0), errors='coerce').fillna(0)
     if fours_col: rbat[fours_col] = pd.to_numeric(rbat[fours_col], errors='coerce').fillna(0)
     if sixes_col: rbat[sixes_col] = pd.to_numeric(rbat[sixes_col], errors='coerce').fillna(0)
@@ -462,6 +470,7 @@ if not master_df.empty:
     master_df['Avg Scout Score'] = master_df[auth_users].mean(axis=1)
     master_df['Scout Override'] = master_df['Player'].apply(lambda x: scout_overrides.get(x, np.nan))
     
+    # Priority cascade: Scout Override -> Avg Scout -> AI Rating -> 0.0
     master_df['Final Scout Rating'] = (
         master_df['Scout Override']
         .combine_first(master_df['Avg Scout Score'])
@@ -691,21 +700,16 @@ with tab2:
         
         # --- GRID 2 (Level-Wise Logic) ---
         st.subheader("🎯 Level-Wise Team Selection (Round Limits)")
-        st.caption("This grid uses **Final Scout Ratings** and enforces cumulative limits at each round (configured in the Admin Tab).")
+        st.caption("This grid enforces cumulative limits at each round. You can directly edit the **Level wise** column in the Remainings Table below.")
         
-        base_limits = [30, 24]
-        custom_limits = app_config.get("level_limits", [23, 22, 21, 20, 19, 18, 17, 16, 15])
-        all_limits = base_limits + custom_limits
+        # Pull cumulative limits from config, ensure they stretch to squad_size
+        default_cum = [30, 54, 78, 101, 124, 145, 166, 185, 204, 214, 228]
+        cum_limits = app_config.get("level_wise_limits", default_cum)
         
-        cum_limits = []
-        current_cum = 0
-        for val in all_limits:
-            current_cum += val
-            cum_limits.append(current_cum)
-            
         while len(cum_limits) < squad_size:
-            current_cum += 15 
-            cum_limits.append(current_cum)
+            last_val = cum_limits[-1] if cum_limits else 0
+            cum_limits.append(last_val + 15)
+        cum_limits = cum_limits[:squad_size]
             
         if "draft_error_level" in st.session_state:
             st.error(st.session_state.draft_error_level)
@@ -731,8 +735,11 @@ with tab2:
 
         level_col_config = {}
         for t in valid_teams:
-            opts = ["--- CLEAR PICK ---"] + avail_opts_lvl
-            level_col_config[t] = st.column_config.SelectboxColumn(t, options=opts, required=False)
+            t_drafted_lvl = [p for p, team in draft_state_level.items() if team == t]
+            t_drafted_opts_lvl = [player_to_string_map.get(p, p) for p in t_drafted_lvl]
+            opts_lvl = ["--- CLEAR PICK ---"] + t_drafted_opts_lvl + avail_opts_lvl
+            
+            level_col_config[t] = st.column_config.SelectboxColumn(t, options=opts_lvl, required=False)
             level_col_config[f"{t} Rtg"] = st.column_config.Column("Scout Rating", disabled=True)
 
         styled_level_grid = level_grid_df.style.background_gradient(subset=rtg_cols, cmap='RdYlGn', vmin=0, vmax=30).format({c: "{:.1f}" for c in rtg_cols}, na_rep="")
@@ -744,11 +751,14 @@ with tab2:
 
         with c_right:
             st.markdown("#### Remainings Table")
+            
             rem_df = pd.DataFrame(index=[f"Round {i+1}" for i in range(squad_size)])
             for t in valid_teams:
                 rem_df[t] = 0.0
-            rem_df["Level wise"] = [cum_limits[i] for i in range(squad_size)]
+            
+            rem_df["Level wise"] = cum_limits
 
+            # Calculate individual team remainings
             for t in valid_teams:
                 running_spent = 0.0
                 for i in range(squad_size):
@@ -764,7 +774,24 @@ with tab2:
                     if val < 0: return 'background-color: #f8d7da; color: #721c24;'
                 return ''
             
-            st.dataframe(rem_df.style.format("{:.1f}").map(style_remainings, subset=valid_teams), use_container_width=True)
+            rem_col_config = {
+                "Level wise": st.column_config.NumberColumn("Level wise", min_value=0, step=1)
+            }
+            for t in valid_teams:
+                rem_col_config[t] = st.column_config.NumberColumn(t, disabled=True)
+                
+            fmt_rem = {t: "{:.1f}" for t in valid_teams}
+            styled_rem = rem_df.style.format(fmt_rem, na_rep="").map(style_remainings, subset=valid_teams)
+            
+            edited_rem = st.data_editor(styled_rem, column_config=rem_col_config, use_container_width=True, key="rem_grid_level")
+            
+            # Save any edits made to the Level wise column back to config
+            new_cum_limits = [float(x) for x in edited_rem["Level wise"].tolist()]
+            if new_cum_limits != cum_limits:
+                app_config["level_wise_limits"] = new_cum_limits
+                save_json(CONFIG_FILE, app_config)
+                push_state_to_gsheets()
+                st.rerun()
 
         level_grid_changed = False
         for t in valid_teams:
@@ -1184,30 +1211,10 @@ with tab7:
                 st.error("Please enter at least one team name.")
 
         st.markdown("---")
-        
-        st.markdown("### 📊 3. Level-Wise Draft Limits (Rounds 3+)")
-        st.write("Rounds 1 and 2 are fixed at 30 and 24 points respectively. Enter the points allowed for each subsequent round (comma-separated).")
-        
-        default_level_limits = app_config.get("level_limits", [23, 22, 21, 20, 19, 18, 17, 16, 15])
-        limits_str = ", ".join(map(str, default_level_limits))
-        new_limits_str = st.text_input("Custom Marginal Limits (e.g. 23, 22, 21...)", value=limits_str)
-        
-        if st.button("💾 Save Level-Wise Limits"):
-            try:
-                parsed_limits = [int(x.strip()) for x in new_limits_str.split(",") if x.strip()]
-                app_config["level_limits"] = parsed_limits
-                save_json(CONFIG_FILE, app_config)
-                push_state_to_gsheets()
-                st.success("✅ Level-wise limits updated for the duplicate draft grid.")
-                st.rerun()
-            except ValueError:
-                st.error("Please enter valid integers separated by commas.")
-
-        st.markdown("---")
 
         ac1, ac2 = st.columns(2)
         with ac1:
-            st.markdown("**4. Setup Rosters, Leadership & Player Pool**")
+            st.markdown("**3. Setup Rosters, Leadership & Player Pool**")
             st.caption("Assign Captains and toggle whether a player is eligible for the draft (Team Player) or held in reserve (Pool Player).")
             if not master_df.empty:
                 draft_df = pd.DataFrame({
@@ -1242,7 +1249,7 @@ with tab7:
                 st.info("Upload data or connect Google Sheet first.")
 
         with ac2:
-            st.markdown("**5. Authorized Evaluators**")
+            st.markdown("**4. Authorized Evaluators**")
             users_text = st.text_area("List names (comma separated)", ", ".join(auth_users))
             if st.button("Update Evaluators"):
                 new_users = [u.strip() for u in users_text.split(",")]
@@ -1252,7 +1259,7 @@ with tab7:
                 st.rerun()
             
             st.markdown("---")
-            st.markdown("**6. Data File Upload**")
+            st.markdown("**5. Data File Upload**")
             uploaded_file = st.file_uploader("Upload Raw Historical Stats (.xlsx)", type=["xlsx"])
             if uploaded_file:
                 with open(DATA_FILE, "wb") as f: f.write(uploaded_file.getbuffer())
@@ -1260,7 +1267,7 @@ with tab7:
                 st.rerun()
 
         st.markdown("---")
-        st.markdown("### 7. 🎛️ Draft & Algorithm Settings")
+        st.markdown("### 6. 🎛️ Draft & Algorithm Settings")
         st.write("Modify the mathematical importance of each metric, or configure the Salary Cap.")
         
         st.markdown("##### 🎯 Salary Cap Rules")
@@ -1324,7 +1331,7 @@ with tab7:
             st.rerun()
 
         st.markdown("---")
-        st.markdown("### 8. 🛠️ Player Name Aliases & Merge Tool")
+        st.markdown("### 7. 🛠️ Player Name Aliases & Merge Tool")
         st.write("Edit the **'Merged Name'** column to fuse mismatched names from your Google Form and Excel sheet.")
         
         all_possible_names = sorted(list(set(all_raw_names + raw_live_names)))
@@ -1344,7 +1351,7 @@ with tab7:
             st.info("Upload an Excel file or connect a Google Sheet to start mapping names.")
 
         st.markdown("---")
-        st.markdown("### 9. 💾 Permanent Cloud Backup & Restore")
+        st.markdown("### 8. 💾 Permanent Cloud Backup & Restore")
         st.write("Legacy local file download and restore.")
         
         bc1, bc2 = st.columns(2)
@@ -1394,7 +1401,7 @@ with tab7:
                 st.rerun()
                 
         st.markdown("---")
-        st.markdown("### 10. ☁️ Google Sheets Database Sync")
+        st.markdown("### 9. ☁️ Google Sheets Database Sync")
         st.write("Turn your Google Sheet into a permanent database! **Important:** You must create a blank tab named exactly `System_State` in your Google Sheet, and your Streamlit Secrets must contain your Service Account JSON.")
         
         gs_1, gs_2 = st.columns(2)
