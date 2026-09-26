@@ -16,7 +16,6 @@ st.set_page_config(page_title="BPL Cricket League", layout="wide", page_icon="�
 # --- FILE PATHS & SECRETS ---
 DATA_FILE = "current_stats.xlsx"
 MAPPING_FILE = "name_mapping.json"
-DRAFT_FILE = "draft_state.json"
 DRAFT_LEVEL_FILE = "draft_state_level.json"
 DRAFT_LOCKS_LEVEL_FILE = "draft_locks_level.json"
 RATINGS_FILE = "human_ratings.json"
@@ -86,7 +85,7 @@ def update_cap_settings():
 
 # --- AUTO-RECOVERY & CLOUD SYNC ---
 def attempt_gsheets_restore():
-    if not os.path.exists(DRAFT_FILE) and "gsheet_url" in DEFAULT_CONFIG:
+    if not os.path.exists(DRAFT_LEVEL_FILE) and "gsheet_url" in DEFAULT_CONFIG:
         try:
             conn = st.connection("gsheets", type=GSheetsConnection)
             df = conn.read(spreadsheet=DEFAULT_CONFIG["gsheet_url"], worksheet="System_State", ttl=0)
@@ -96,7 +95,6 @@ def attempt_gsheets_restore():
                     try: val = json.loads(row['Value'])
                     except: continue
                     if key == "mappings": save_json(MAPPING_FILE, val)
-                    elif key == "draft": save_json(DRAFT_FILE, val)
                     elif key == "draft_level": save_json(DRAFT_LEVEL_FILE, val)
                     elif key == "draft_locks_level": save_json(DRAFT_LOCKS_LEVEL_FILE, val)
                     elif key == "ratings": save_json(RATINGS_FILE, val)
@@ -123,7 +121,6 @@ for original, merged in DEFAULT_MAPPINGS.items():
         saved_mapping[original] = merged
         mapping_changed = True
 
-draft_state = load_json(DRAFT_FILE, {}) 
 draft_state_level = load_json(DRAFT_LEVEL_FILE, {})
 draft_locks_level = load_json(DRAFT_LOCKS_LEVEL_FILE, {})
 leadership_state = load_json(LEADERSHIP_FILE, {})
@@ -142,7 +139,7 @@ def push_state_to_gsheets():
         url = app_config.get("gsheet_url", DEFAULT_CONFIG["gsheet_url"])
         
         backup_data = {
-            "mappings": saved_mapping, "draft": draft_state, "draft_level": draft_state_level, 
+            "mappings": saved_mapping, "draft_level": draft_state_level, 
             "draft_locks_level": draft_locks_level, "ratings": human_ratings,
             "weights": algo_weights, "leadership": leadership_state, "pool": pool_state,
             "overrides": scout_overrides, "config": app_config, "users": auth_users
@@ -177,10 +174,16 @@ for t in valid_configured_teams:
         draft_locks_level[t] = existing_locks[:squad_size]
 
 # --- FULL-WIDTH CENTERED HEADER ---
-logo_html = "<span style='font-size: 50px; vertical-align: middle; margin-right: 20px;'>🏏</span>"
+logo_path = None
 if os.path.exists("logo.png"):
+    logo_path = "logo.png"
+elif os.path.exists("Logo.png"):
+    logo_path = "Logo.png"
+
+logo_html = "<span style='font-size: 50px; vertical-align: middle; margin-right: 20px;'>🏏</span>"
+if logo_path:
     try:
-        with open("logo.png", "rb") as f:
+        with open(logo_path, "rb") as f:
             img_data = base64.b64encode(f.read()).decode()
         logo_html = f'<img src="data:image/png;base64,{img_data}" style="height: 80px; vertical-align: middle; margin-right: 20px;">'
     except Exception:
@@ -485,7 +488,7 @@ if not master_df.empty:
     
     master_df['Tier'] = pd.cut(master_df['AI Rating'], bins=[-1, 13.9, 19.9, 25.9, 31], labels=["Bronze", "Silver", "Gold", "Platinum"])
 
-    master_df['Draft Status'] = master_df['Player'].apply(lambda x: draft_state.get(x, "Available"))
+    master_df['Draft Status'] = master_df['Player'].apply(lambda x: draft_state_level.get(x, "Available"))
     master_df['Leadership'] = master_df['Player'].apply(lambda x: leadership_state.get(x, "None"))
     
     def determine_pool_status(row):
@@ -599,23 +602,12 @@ with tab2:
     else:
         squad_size = int(algo_weights.get("squad_size", 11))
         team_budget = float(algo_weights.get("team_budget", 240.0))
-        
-        c_title, c_btn = st.columns([8, 2])
-        with c_title:
-            st.subheader("🎯 Primary Team Selection (Total Cap)")
-            st.caption("All draft values, budgets, and grid cells are powered by the **Final Scout Rating**.")
-        with c_btn:
-            if st.button("🧹 Clear Primary Grid", use_container_width=True):
-                draft_state.clear()
-                save_json(DRAFT_FILE, draft_state)
-                push_state_to_gsheets()
-                st.session_state["primary_grid_version"] = st.session_state.get("primary_grid_version", 0) + 1
-                st.rerun()
-        
         valid_teams = [t for t in TEAMS if t != "Available"]
         num_teams = len(valid_teams)
         
-        # --- GRID 1 (Total Budget) ---
+        st.subheader("🎯 Official Team Selection")
+        
+        # --- FRANCHISE SUMMARY TABLE ---
         drafted_df = master_df[master_df['Draft Status'] != "Available"]
         
         st.markdown("#### 💰 Franchise Cap & Roster Summary")
@@ -647,112 +639,15 @@ with tab2:
 
         st.dataframe(sum_df.style.apply(color_summary, axis=None), use_container_width=True)
 
-        if "draft_error" in st.session_state:
-            st.error(st.session_state.draft_error)
-            del st.session_state.draft_error
-
-        grid_df = pd.DataFrame(index=[f"Rnd {i+1}" for i in range(squad_size)])
-        for t in valid_teams:
-            grid_df[t] = ""
-            grid_df[f"{t} Rtg"] = np.nan
-
-        for t in valid_teams:
-            t_players = [p for p, team in draft_state.items() if team == t]
-            for i, p_name in enumerate(t_players):
-                if i < squad_size:
-                    mapped_string = player_to_string_map.get(p_name, p_name)
-                    grid_df.iat[i, grid_df.columns.get_loc(t)] = mapped_string
-                    p_match = master_df[master_df['Player'] == p_name]
-                    if not p_match.empty:
-                        grid_df.iat[i, grid_df.columns.get_loc(f"{t} Rtg")] = int(p_match.iloc[0]['Final Scout Rating'])
-
-        drafted_primary_players = list(draft_state.keys())
-
-        col_config = {}
-        for t in valid_teams:
-            t_drafted_df = master_df[master_df['Draft Status'] == t]
-            avail_mask = (~master_df['Player'].isin(drafted_primary_players)) & (master_df['Pool Status'] == "Team Player")
-            combined_opts_df = pd.concat([t_drafted_df, master_df[avail_mask]]).sort_values('Final Scout Rating', ascending=False)
-            
-            opts = ["--- CLEAR PICK ---"] + [player_to_string_map[row['Player']] for _, row in combined_opts_df.iterrows()]
-            
-            col_config[t] = st.column_config.SelectboxColumn(t, options=opts, required=False)
-            col_config[f"{t} Rtg"] = st.column_config.Column("Scout Rating", disabled=True)
-
-        rtg_cols = [f"{t} Rtg" for t in valid_teams]
-        styled_grid = grid_df.style.background_gradient(subset=rtg_cols, cmap='RdYlGn', vmin=0, vmax=30).format({c: "{:.0f}" for c in rtg_cols}, na_rep="")
-
-        primary_grid_key = f"live_grid_{st.session_state.get('primary_grid_version', 0)}"
-        edited_grid = st.data_editor(styled_grid, column_config=col_config, use_container_width=True, key=primary_grid_key)
-
-        grid_changed = False
-        for t in valid_teams:
-            for i in range(squad_size):
-                old_val = grid_df.iat[i, grid_df.columns.get_loc(t)]
-                new_val = edited_grid.iat[i, edited_grid.columns.get_loc(t)]
-                if old_val != new_val:
-                    grid_changed = True
-                    break
-
-        if grid_changed:
-            has_error = False
-            new_draft_state = draft_state.copy()
-            for t in valid_teams:
-                for p, team in list(new_draft_state.items()):
-                    if team == t: del new_draft_state[p]
-                
-                t_players = []
-                for i in range(squad_size):
-                    val = edited_grid.iat[i, edited_grid.columns.get_loc(t)]
-                    clean_name = string_to_player_map.get(val, "")
-                    if clean_name: t_players.append(clean_name)
-                
-                if len(t_players) != len(set(t_players)):
-                    st.session_state.draft_error = f"❌ REJECTED: Duplicate pick detected for {t}."
-                    has_error = True
-                    break
-
-                t_spent = sum([master_df[master_df['Player'] == p]['Final Scout Rating'].iloc[0] for p in t_players if p in master_df['Player'].values])
-                t_rem = team_budget - t_spent
-                t_count = len(t_players)
-                
-                if t_spent > team_budget:
-                    st.session_state.draft_error = f"❌ SALARY CAP EXCEEDED: {t} cannot afford this roster ({int(t_spent)} / {int(team_budget)} pts)! Edit reverted."
-                    has_error = True
-                    break
-
-                if t_rem < (0.0 * (squad_size - t_count)):
-                    min_req = 0.0 * (squad_size - t_count)
-                    st.session_state.draft_error = f"❌ INVALID ROSTER: {t} must save {int(min_req)} points for remaining slots. Edit reverted."
-                    has_error = True
-                    break
-                    
-                for p in t_players: new_draft_state[p] = t
-
-            if has_error:
-                st.session_state["primary_grid_version"] = st.session_state.get("primary_grid_version", 0) + 1
-                st.rerun()
-            else:
-                save_json(DRAFT_FILE, new_draft_state)
-                
-                current_time = time.time()
-                if current_time - st.session_state.get("last_gsheet_sync", 0) > 240:
-                    push_state_to_gsheets()
-                    st.session_state["last_gsheet_sync"] = current_time
-                else:
-                    st.toast("✅ Pick saved locally! Cloud sync runs every 4 minutes to prevent quota errors.")
-                st.rerun()
-
-
         st.markdown("---")
         
-        # --- GRID 2 (Level-Wise Logic) ---
+        # --- LEVEL-WISE DRAFT GRID ---
         c_lvl_title, c_lvl_btn = st.columns([8, 2])
         with c_lvl_title:
-            st.subheader("🎯 Level-Wise Team Selection (Round Limits)")
+            st.markdown("#### Selection Board & Round Limits")
             st.caption("Toggle the **🔒** box to lock a player. You may exceed limits *only* on the final pick. Edit limits in the Remainings Table below.")
         with c_lvl_btn:
-            if st.button("🧹 Clear Level-Wise Grid", use_container_width=True):
+            if st.button("🧹 Clear Draft Board", use_container_width=True):
                 draft_state_level.clear()
                 for t in valid_teams:
                     draft_locks_level[t] = [False] * squad_size
@@ -806,17 +701,16 @@ with tab2:
             level_col_config[f"{t} 🔒"] = st.column_config.CheckboxColumn("🔒", default=False)
             level_col_config[f"{t} Rtg"] = st.column_config.Column("Scout Rating", disabled=True)
 
+        rtg_cols = [f"{t} Rtg" for t in valid_teams]
         styled_level_grid = level_grid_df.style.background_gradient(subset=rtg_cols, cmap='RdYlGn', vmin=0, vmax=30).format({c: "{:.0f}" for c in rtg_cols}, na_rep="")
         
         # 70% / 30% Non-scrollable layout
         c_left, c_right = st.columns([7, 3])
         with c_left:
-            st.markdown("#### Selection Board")
             level_grid_key = f"live_grid_level_{st.session_state.get('level_grid_version', 0)}"
             edited_level_grid = st.data_editor(styled_level_grid, column_config=level_col_config, use_container_width=True, key=level_grid_key)
 
         with c_right:
-            st.markdown("#### Remainings Table")
             rem_df = pd.DataFrame(index=[f"Rnd {i+1}" for i in range(squad_size)])
             for t in valid_teams: rem_df[t] = 0.0
             rem_df["Level wise"] = cum_limits
@@ -828,7 +722,7 @@ with tab2:
                     clean_name = string_to_player_map.get(val, "")
                     p_match = master_df[master_df['Player'] == clean_name]
                     if not p_match.empty:
-                        running_spent += int(p_match.iloc[0]['Final Scout Rating'])
+                        running_spent += float(p_match.iloc[0]['Final Scout Rating'])
                     rem_df.iat[i, rem_df.columns.get_loc(t)] = cum_limits[i] - running_spent
 
             def style_remainings(val):
@@ -931,6 +825,29 @@ with tab2:
                 else:
                     st.toast("✅ Pick saved locally! Cloud sync runs every 4 minutes to prevent quota errors.")
                 st.rerun()
+
+        st.markdown("---")
+        
+        # --- CLEAN ROSTER EXPORT TABLE ---
+        st.markdown("#### 📥 Clean Roster Export")
+        st.caption("Final team rosters without ratings or lock icons. You can download this table as a CSV using the download icon in the top right of the table.")
+        
+        export_df = pd.DataFrame(index=[f"Rnd {i+1}" for i in range(squad_size)])
+        for t in valid_teams:
+            t_players = [p for p, team in draft_state_level.items() if team == t]
+            padded_players = t_players + [""] * (squad_size - len(t_players))
+            export_df[t] = padded_players[:squad_size]
+
+        st.dataframe(export_df, use_container_width=True)
+
+        csv_data = export_df.to_csv(index=True).encode('utf-8')
+        st.download_button(
+            label="📥 Download Rosters (CSV)",
+            data=csv_data,
+            file_name="bpl_clean_rosters.csv",
+            mime="text/csv",
+            type="primary"
+        )
 
 # --- TAB 3: TEAM ANALYTICS ---
 with tab3:
@@ -1346,13 +1263,13 @@ with tab7:
                     hide_index=True, use_container_width=True
                 )
                 if st.button("💾 Save Rosters, Roles & Pool"):
-                    new_draft = dict(zip(edited_draft["Player"], edited_draft["Draft Status"]))
+                    new_draft_level = dict(zip(edited_draft["Player"], edited_draft["Draft Status"]))
                     new_pool = dict(zip(edited_draft["Player"], edited_draft["Pool Status"]))
                     
                     new_leaders = dict(zip(edited_draft["Player"], edited_draft["Leadership"]))
                     new_leaders = {k: v for k, v in new_leaders.items() if v != "None"}
                     
-                    save_json(DRAFT_FILE, new_draft)
+                    save_json(DRAFT_LEVEL_FILE, new_draft_level)
                     save_json(LEADERSHIP_FILE, new_leaders)
                     save_json(POOL_FILE, new_pool)
                     push_state_to_gsheets()
@@ -1471,7 +1388,6 @@ with tab7:
         with bc1:
             backup_data = {
                 "mappings": saved_mapping,
-                "draft": draft_state,
                 "draft_level": draft_state_level,
                 "draft_locks_level": draft_locks_level,
                 "ratings": human_ratings,
@@ -1501,7 +1417,6 @@ with tab7:
                     st.success("✅ Raw human ratings file detected and restored!")
                 else:
                     if "mappings" in restore_data: save_json(MAPPING_FILE, restore_data.get("mappings", {}))
-                    if "draft" in restore_data: save_json(DRAFT_FILE, restore_data.get("draft", {}))
                     if "draft_level" in restore_data: save_json(DRAFT_LEVEL_FILE, restore_data.get("draft_level", {}))
                     if "draft_locks_level" in restore_data: save_json(DRAFT_LOCKS_LEVEL_FILE, restore_data.get("draft_locks_level", {}))
                     if "ratings" in restore_data: save_json(RATINGS_FILE, restore_data.get("ratings", {}))
@@ -1540,7 +1455,6 @@ with tab7:
                                 except: continue
                                 
                                 if key == "mappings": save_json(MAPPING_FILE, val)
-                                elif key == "draft": save_json(DRAFT_FILE, val)
                                 elif key == "draft_level": save_json(DRAFT_LEVEL_FILE, val)
                                 elif key == "draft_locks_level": save_json(DRAFT_LOCKS_LEVEL_FILE, val)
                                 elif key == "ratings": save_json(RATINGS_FILE, val)
