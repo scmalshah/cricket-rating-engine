@@ -682,7 +682,10 @@ with tab2:
             t_drafted_opts = [player_to_string_map.get(p, p) for p in t_drafted]
             
             opts = ["--- CLEAR PICK ---"] + t_drafted_opts + avail_opts
-            col_config[t] = st.column_config.SelectboxColumn(f"{t} Name", options=opts, required=False)
+            
+            # THE FIX: Removed the " Name" text so the column header perfectly matches the Team Configuration.
+            col_config[t] = st.column_config.SelectboxColumn(t, options=opts, required=False)
+            
             col_config[f"{t} Rtg"] = st.column_config.Column("Scout Rating", disabled=True)
 
         rtg_cols = [f"{t} Rtg" for t in valid_teams]
