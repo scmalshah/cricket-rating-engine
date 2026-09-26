@@ -579,6 +579,9 @@ with tab2:
     if master_df.empty:
         st.info("Data required.")
     else:
+        squad_size = int(algo_weights.get("squad_size", 11))
+        team_budget = float(algo_weights.get("team_budget", 240.0))
+        
         c_title, c_btn = st.columns([8, 2])
         with c_title:
             st.subheader("🎯 Primary Team Selection (Total Cap)")
