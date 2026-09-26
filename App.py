@@ -8,8 +8,9 @@ import urllib.parse
 import plotly.graph_objects as go
 import plotly.express as px
 from streamlit_gsheets import GSheetsConnection
+import time
 
-st.set_page_config(page_title="BPL Cricket", layout="wide", page_icon="🏏")
+st.set_page_config(page_title="BPL Cricket League", layout="wide", page_icon="🏏")
 
 # --- FILE PATHS & SECRETS ---
 DATA_FILE = "current_stats.xlsx"
@@ -175,7 +176,14 @@ for t in valid_configured_teams:
         draft_locks_level[t] = existing_locks[:squad_size]
 
 # --- HEADER ---
-st.title("🏏 BPL Cricket")
+col_h1, col_h2 = st.columns([1, 15])
+with col_h1:
+    if os.path.exists("logo.png"):
+        st.image("logo.png", width=60)
+    else:
+        st.markdown("<h1 style='text-align: center;'>🏏</h1>", unsafe_allow_html=True)
+with col_h2:
+    st.title("BPL Cricket League")
 st.markdown("Advanced AI Rating, Live Roster Management, and Committee Ratings.")
 
 # --- DATA PROCESSING ENGINE ---
@@ -716,7 +724,13 @@ with tab2:
                 st.rerun()
             else:
                 save_json(DRAFT_FILE, new_draft_state)
-                push_state_to_gsheets()
+                
+                current_time = time.time()
+                if current_time - st.session_state.get("last_gsheet_sync", 0) > 240:
+                    push_state_to_gsheets()
+                    st.session_state["last_gsheet_sync"] = current_time
+                else:
+                    st.toast("✅ Pick saved locally! Cloud sync runs every 4 minutes to prevent quota errors.")
                 st.rerun()
 
 
@@ -726,7 +740,7 @@ with tab2:
         c_lvl_title, c_lvl_btn = st.columns([8, 2])
         with c_lvl_title:
             st.subheader("🎯 Level-Wise Team Selection (Round Limits)")
-            st.caption("Toggle the **🔒** box to lock a player. Locked players cannot be changed until unlocked. Edit limits in the Remainings Table below.")
+            st.caption("Toggle the **🔒** box to lock a player. You may exceed limits *only* on the final pick. Edit limits in the Remainings Table below.")
         with c_lvl_btn:
             if st.button("🧹 Clear Level-Wise Grid", use_container_width=True):
                 draft_state_level.clear()
@@ -785,7 +799,7 @@ with tab2:
 
         styled_level_grid = level_grid_df.style.background_gradient(subset=rtg_cols, cmap='RdYlGn', vmin=0, vmax=30).format({c: "{:.1f}" for c in rtg_cols}, na_rep="")
         
-        c_left, c_right = st.columns([3, 1])
+        c_left, c_right = st.columns([4, 1])
         with c_left:
             st.markdown("#### Selection Board")
             edited_level_grid = st.data_editor(styled_level_grid, column_config=level_col_config, use_container_width=True, key="live_grid_level")
@@ -862,8 +876,17 @@ with tab2:
                         if clean_name: t_players.append(clean_name)
                         
                         t_spent_round = sum([master_df[master_df['Player'] == p]['Final Scout Rating'].iloc[0] for p in t_players if p in master_df['Player'].values])
-                        if t_spent_round > cum_limits[i]:
+                        
+                        is_final_round = (i == squad_size - 1)
+                        
+                        if t_spent_round > cum_limits[i] and not is_final_round:
                             st.session_state.draft_error_level = f"❌ LEVEL CAP EXCEEDED: {t} exceeded the Round {i+1} cumulative limit of {cum_limits[i]} (Spent: {t_spent_round:.1f})! Edit reverted."
+                            has_error = True
+                            break
+                        
+                        new_lock = new_draft_locks_level[t][i]
+                        if new_lock and t_spent_round > cum_limits[i] and not is_final_round:
+                            st.session_state.draft_error_level = f"❌ CANNOT LOCK: {t} does not have sufficient points available in Round {i+1} to lock this player! (Spent: {t_spent_round:.1f} / Limit: {cum_limits[i]}). Edit reverted."
                             has_error = True
                             break
                             
@@ -882,7 +905,13 @@ with tab2:
             else:
                 save_json(DRAFT_LEVEL_FILE, new_draft_state_level)
                 save_json(DRAFT_LOCKS_LEVEL_FILE, new_draft_locks_level)
-                push_state_to_gsheets()
+                
+                current_time = time.time()
+                if current_time - st.session_state.get("last_gsheet_sync", 0) > 240:
+                    push_state_to_gsheets()
+                    st.session_state["last_gsheet_sync"] = current_time
+                else:
+                    st.toast("✅ Pick saved locally! Cloud sync runs every 4 minutes to prevent quota errors.")
                 st.rerun()
 
 # --- TAB 3: TEAM ANALYTICS ---
