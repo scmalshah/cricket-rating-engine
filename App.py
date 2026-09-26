@@ -44,7 +44,8 @@ DEFAULT_WEIGHTS = {
 DEFAULT_CONFIG = {
     "gsheet_url": "https://docs.google.com/spreadsheets/d/16j0UEOr_DN-kDNjyFt65IxJxnuEWjyto4o_4ShA4SN0/edit?resourcekey=&gid=436661694#gid=436661694",
     "gsheet_col": "Full Name",
-    "gsheet_pool_col": "How do you want to play?"
+    "gsheet_pool_col": "How do you want to play?",
+    "teams": ["Team 1", "Team 2", "Team 3", "Team 4", "Team 5"]
 }
 
 # --- HELPER FUNCTIONS ---
@@ -102,6 +103,30 @@ def attempt_gsheets_restore():
 
 attempt_gsheets_restore()
 
+# --- LOAD STATES ---
+app_config = load_json(CONFIG_FILE, DEFAULT_CONFIG)
+for k, v in DEFAULT_CONFIG.items():
+    if k not in app_config:
+        app_config[k] = v
+
+saved_mapping = load_json(MAPPING_FILE, {})
+mapping_changed = False
+for original, merged in DEFAULT_MAPPINGS.items():
+    if original not in saved_mapping:
+        saved_mapping[original] = merged
+        mapping_changed = True
+
+draft_state = load_json(DRAFT_FILE, {}) 
+leadership_state = load_json(LEADERSHIP_FILE, {})
+pool_state = load_json(POOL_FILE, {})
+human_ratings = load_json(RATINGS_FILE, {}) 
+scout_overrides = load_json(OVERRIDES_FILE, {})
+auth_users = load_json(USERS_FILE, ["Admin", "Captain 1", "Captain 2"])
+
+algo_weights = load_json(WEIGHTS_FILE, DEFAULT_WEIGHTS)
+for k, v in DEFAULT_WEIGHTS.items():
+    if k not in algo_weights: algo_weights[k] = v
+
 def push_state_to_gsheets():
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
@@ -121,29 +146,16 @@ def push_state_to_gsheets():
     except Exception as e:
         st.toast(f"⚠️ Cloud auto-save failed: {e}")
 
-# --- LOAD STATES ---
-saved_mapping = load_json(MAPPING_FILE, {})
-mapping_changed = False
-for original, merged in DEFAULT_MAPPINGS.items():
-    if original not in saved_mapping:
-        saved_mapping[original] = merged
-        mapping_changed = True
 if mapping_changed: 
     save_json(MAPPING_FILE, saved_mapping)
     push_state_to_gsheets()
 
-draft_state = load_json(DRAFT_FILE, {}) 
-leadership_state = load_json(LEADERSHIP_FILE, {})
-pool_state = load_json(POOL_FILE, {})
-human_ratings = load_json(RATINGS_FILE, {}) 
-scout_overrides = load_json(OVERRIDES_FILE, {})
-auth_users = load_json(USERS_FILE, ["Admin", "Captain 1", "Captain 2"])
-app_config = load_json(CONFIG_FILE, DEFAULT_CONFIG)
-TEAMS = ["Available", "Team 1", "Team 2", "Team 3", "Team 4", "Team 5"]
-
-algo_weights = load_json(WEIGHTS_FILE, DEFAULT_WEIGHTS)
-for k, v in DEFAULT_WEIGHTS.items():
-    if k not in algo_weights: algo_weights[k] = v
+# --- DYNAMIC TEAMS SETUP ---
+config_teams = app_config.get("teams", ["Team 1", "Team 2", "Team 3", "Team 4", "Team 5"])
+valid_configured_teams = [t.strip() for t in config_teams if t and str(t).strip()]
+if not valid_configured_teams:
+    valid_configured_teams = ["Team 1", "Team 2", "Team 3", "Team 4", "Team 5"]
+TEAMS = ["Available"] + valid_configured_teams
 
 # --- HEADER ---
 st.title("🏏 BPL Cricket")
@@ -267,7 +279,6 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w, valid_players=No
 
     extras = np.zeros(len(rbowl))
     if not rbowl.empty:
-        # Detect Dot Balls
         dots_col = next((c for c in rbowl.columns if str(c).lower().strip() in ['dots', 'dot balls', 'dot', '0s', '0', 'dotball']), None)
         if dots_col: rbowl['Dots'] = pd.to_numeric(rbowl[dots_col], errors='coerce').fillna(0)
         else: rbowl['Dots'] = 0
@@ -490,14 +501,22 @@ if not master_df.empty:
     
     master_df['Avg Scout Score'] = master_df[auth_users].mean(axis=1)
     master_df['Scout Override'] = master_df['Player'].apply(lambda x: scout_overrides.get(x, np.nan))
-    master_df['Final Scout Rating'] = master_df['Scout Override'].combine_first(master_df['Avg Scout Score'])
+    
+    # Priority cascade: Scout Override -> Avg Scout -> AI Rating -> 0.0
+    master_df['Final Scout Rating'] = (
+        master_df['Scout Override']
+        .combine_first(master_df['Avg Scout Score'])
+        .combine_first(master_df['AI Rating'])
+        .fillna(0.0)
+        .round(1)
+    )
 
 player_to_string_map = {}
 string_to_player_map = {"--- CLEAR PICK ---": "", "": ""}
 
 if not master_df.empty:
     for _, row in master_df.iterrows():
-        disp_string = f"{row['Player']} ({row['AI Rating']:.1f})"
+        disp_string = f"{row['Player']} ({row['Final Scout Rating']:.1f})"
         player_to_string_map[row['Player']] = disp_string
         string_to_player_map[disp_string] = row['Player']
 
@@ -521,7 +540,7 @@ with tab1:
             <div style="flex: 1;"><span style="font-size: 0.85em; color: #6c757d; font-weight: 600; text-transform: uppercase;">Total Players</span><br><span style="font-size: 1.6em; font-weight: bold;">{total_p}</span></div>
             <div style="flex: 1;"><span style="font-size: 0.85em; color: #6c757d; font-weight: 600; text-transform: uppercase;">Available</span><br><span style="font-size: 1.6em; font-weight: bold; color: #28a745;">{avail_p}</span></div>
             <div style="flex: 1;"><span style="font-size: 0.85em; color: #6c757d; font-weight: 600; text-transform: uppercase;">Platinum Tier</span><br><span style="font-size: 1.6em; font-weight: bold; color: #6f42c1;">{plat_p}</span></div>
-            <div style="flex: 1;"><span style="font-size: 0.85em; color: #6c757d; font-weight: 600; text-transform: uppercase;">Avg Rated Score</span><br><span style="font-size: 1.6em; font-weight: bold;">{avg_p}</span></div>
+            <div style="flex: 1;"><span style="font-size: 0.85em; color: #6c757d; font-weight: 600; text-transform: uppercase;">Avg AI Rating</span><br><span style="font-size: 1.6em; font-weight: bold;">{avg_p}</span></div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -581,6 +600,7 @@ with tab2:
         st.info("Data required.")
     else:
         st.subheader("🎯 Team Selection & Salary Cap")
+        st.caption("All draft values, budgets, and grid cells are powered by the **Final Scout Rating**.")
         
         squad_size = int(algo_weights.get("squad_size", 11))
         team_budget = float(algo_weights.get("team_budget", 240.0))
@@ -590,12 +610,12 @@ with tab2:
         drafted_df = master_df[master_df['Draft Status'] != "Available"]
         num_drafted = len(drafted_df)
         
-        round_num = (num_drafted // num_teams) + 1
-        pick_in_round = num_drafted % num_teams
+        round_num = (num_drafted // num_teams) + 1 if num_teams > 0 else 1
+        pick_in_round = num_drafted % num_teams if num_teams > 0 else 0
         if (round_num % 2) != 0:
-            on_the_clock = valid_teams[pick_in_round]
+            on_the_clock = valid_teams[pick_in_round] if num_teams > 0 else "None"
         else:
-            on_the_clock = valid_teams[num_teams - 1 - pick_in_round]
+            on_the_clock = valid_teams[num_teams - 1 - pick_in_round] if num_teams > 0 else "None"
             
         st.markdown("---")
         st.markdown(f"### 🟢 ON THE CLOCK: **{on_the_clock}** (Round {round_num}, Pick {pick_in_round + 1})")
@@ -605,7 +625,7 @@ with tab2:
         
         for t in valid_teams:
             t_df = drafted_df[drafted_df['Draft Status'] == t]
-            spent = t_df['AI Rating'].sum() if not t_df.empty else 0.0
+            spent = t_df['Final Scout Rating'].sum() if not t_df.empty else 0.0
             rem = team_budget - spent
             players_added = len(t_df)
             players_needed = squad_size - players_added
@@ -651,9 +671,9 @@ with tab2:
                     
                     p_match = master_df[master_df['Player'] == p_name]
                     if not p_match.empty:
-                        grid_df.iat[i, grid_df.columns.get_loc(f"{t} Rtg")] = float(p_match.iloc[0]['AI Rating'])
+                        grid_df.iat[i, grid_df.columns.get_loc(f"{t} Rtg")] = float(p_match.iloc[0]['Final Scout Rating'])
 
-        avail_team_players = master_df[(master_df['Draft Status'] == "Available") & (master_df['Pool Status'] == "Team Player")].sort_values('AI Rating', ascending=False)
+        avail_team_players = master_df[(master_df['Draft Status'] == "Available") & (master_df['Pool Status'] == "Team Player")].sort_values('Final Scout Rating', ascending=False)
         avail_opts = [player_to_string_map[row['Player']] for _, row in avail_team_players.iterrows()]
 
         col_config = {}
@@ -663,7 +683,7 @@ with tab2:
             
             opts = ["--- CLEAR PICK ---"] + t_drafted_opts + avail_opts
             col_config[t] = st.column_config.SelectboxColumn(f"{t} Name", options=opts, required=False)
-            col_config[f"{t} Rtg"] = st.column_config.Column("Ratings", disabled=True)
+            col_config[f"{t} Rtg"] = st.column_config.Column("Scout Rating", disabled=True)
 
         rtg_cols = [f"{t} Rtg" for t in valid_teams]
         styled_grid = grid_df.style.background_gradient(subset=rtg_cols, cmap='RdYlGn', vmin=0, vmax=30).format({c: "{:.1f}" for c in rtg_cols}, na_rep="")
@@ -698,12 +718,12 @@ with tab2:
                     has_error = True
                     break
 
-                t_spent = sum([master_df[master_df['Player'] == p]['AI Rating'].iloc[0] for p in t_players if p in master_df['Player'].values])
+                t_spent = sum([master_df[master_df['Player'] == p]['Final Scout Rating'].iloc[0] for p in t_players if p in master_df['Player'].values])
                 t_rem = team_budget - t_spent
                 t_count = len(t_players)
                 
                 if t_spent > team_budget:
-                    st.session_state.draft_error = f"❌ SALARY CAP EXCEEDED: {t} cannot afford this roster! Edit reverted."
+                    st.session_state.draft_error = f"❌ SALARY CAP EXCEEDED: {t} cannot afford this roster ({t_spent:.1f} / {team_budget:.1f} pts)! Edit reverted."
                     has_error = True
                     break
 
@@ -734,18 +754,22 @@ with tab3:
             st.info("No players drafted yet. Use the Team Selection tab to begin.")
         else:
             team_stats = drafted.groupby('Draft Status').agg(
-                Players=('Player', 'count'), Total_AI_Rating=('AI Rating', 'sum'),
-                Avg_AI_Rating=('AI Rating', 'mean'), Total_Runs=('Runs_bat', 'sum'), Total_Wkts=('Wkts', 'sum')
+                Players=('Player', 'count'),
+                Total_Scout_Rating=('Final Scout Rating', 'sum'),
+                Avg_Scout_Rating=('Final Scout Rating', 'mean'),
+                Total_AI_Rating=('AI Rating', 'sum'),
+                Total_Runs=('Runs_bat', 'sum'),
+                Total_Wkts=('Wkts', 'sum')
             ).reset_index()
             
             c1, c2 = st.columns(2)
-            fig1 = px.bar(team_stats, x='Draft Status', y='Avg_AI_Rating', title="Average Team Rating", color='Draft Status')
+            fig1 = px.bar(team_stats, x='Draft Status', y='Avg_Scout_Rating', title="Average Team Scout Rating", color='Draft Status')
             c1.plotly_chart(fig1, use_container_width=True)
             
-            fig2 = px.bar(team_stats, x='Draft Status', y='Total_AI_Rating', title="Total Team Power Score", color='Draft Status')
+            fig2 = px.bar(team_stats, x='Draft Status', y='Total_Scout_Rating', title="Total Team Power Score (Scout Rating)", color='Draft Status')
             c2.plotly_chart(fig2, use_container_width=True)
             
-            st.dataframe(team_stats.style.format({'Avg_AI_Rating': "{:.1f}"}), use_container_width=True)
+            st.dataframe(team_stats.style.format({'Avg_Scout_Rating': "{:.1f}", 'Total_Scout_Rating': "{:.1f}", 'Total_AI_Rating': "{:.1f}"}), use_container_width=True)
 
 # --- TAB 4: PLAYER PROFILES ---
 with tab4:
@@ -753,7 +777,7 @@ with tab4:
         st.info("Data required.")
     else:
         st.subheader("Advanced Player Scouting Profiles")
-        selected_player = st.selectbox("Search Player", master_df.sort_values('AI Rating', ascending=False)['Player'])
+        selected_player = st.selectbox("Search Player", master_df.sort_values('Final Scout Rating', ascending=False)['Player'])
         
         if selected_player:
             p_data = master_df[master_df['Player'] == selected_player].iloc[0]
@@ -766,11 +790,9 @@ with tab4:
                 st.markdown(f"**Data Source:** {p_data.get('Data Source', 'Unknown')}")
                 
                 st.markdown("---")
-                st.markdown("#### Mathematical Evaluations")
+                st.markdown("#### Evaluations")
+                st.markdown(f"**Final Scout Rating (Draft Cost):** `{p_data['Final Scout Rating']:.1f}` *(Used in Draft & Salary Cap)*")
                 st.markdown(f"**AI Rating:** `{p_data['AI Rating']:.1f}` *(Dual-Anchor: Top=30.0, Median=15.5)*")
-                st.markdown(f"**Rtg (MinMax):** `{p_data.get('Rtg_MinMax', 0.0):.1f}` *(Linear Scale from Best to Worst)*")
-                st.markdown(f"**Rtg (Pct):** `{p_data.get('Rtg_Pct', 0.0):.1f}` *(Uniform Percentile)*")
-                st.markdown(f"**Final Scout Rating:** `{p_data['Final Scout Rating']:.1f}` *(Human Committee)*")
                 st.markdown(f"**Drafted To:** {p_data['Draft Status']}")
                 
                 st.markdown("---")
@@ -801,7 +823,7 @@ with tab4:
                 
                 bound_max = master_df['Boundary_Score'].max()
                 bound_min = master_df['Boundary_Score'].min()
-                r_bound = (p_data['Boundary_Score'] - bound_min) / (bound_max - bound_min + 0.01) if bound_max != bound_min else 0.5
+                r_bound = (p_data['Boundary_Score'] - bound_min) / (bound_max - bound_min + 0.01) if bat_max != bat_min else 0.5
                 
                 bowl_max = master_df['Bowl_Score'].max()
                 bowl_min = master_df['Bowl_Score'].min()
@@ -1075,9 +1097,28 @@ with tab7:
 
         st.markdown("---")
         
+        st.markdown("### 🏷️ 2. Franchise & Team Names Configuration")
+        st.write("Customize the participating team names for the draft room, cap sheets, and live dashboards.")
+        
+        current_teams_str = ", ".join(app_config.get("teams", ["Team 1", "Team 2", "Team 3", "Team 4", "Team 5"]))
+        new_teams_str = st.text_input("Configured Teams (comma-separated)", value=current_teams_str)
+        
+        if st.button("💾 Save Team Names"):
+            parsed_teams = [t.strip() for t in new_teams_str.split(",") if t and t.strip()]
+            if parsed_teams:
+                app_config["teams"] = parsed_teams
+                save_json(CONFIG_FILE, app_config)
+                push_state_to_gsheets()
+                st.success("✅ Team names updated successfully! The draft room and filters have refreshed.")
+                st.rerun()
+            else:
+                st.error("Please enter at least one team name.")
+
+        st.markdown("---")
+
         ac1, ac2 = st.columns(2)
         with ac1:
-            st.markdown("**2. Setup Rosters, Leadership & Player Pool**")
+            st.markdown("**3. Setup Rosters, Leadership & Player Pool**")
             st.caption("Assign Captains and toggle whether a player is eligible for the draft (Team Player) or held in reserve (Pool Player).")
             if not master_df.empty:
                 draft_df = pd.DataFrame({
@@ -1112,7 +1153,7 @@ with tab7:
                 st.info("Upload data or connect Google Sheet first.")
 
         with ac2:
-            st.markdown("**3. Authorized Evaluators**")
+            st.markdown("**4. Authorized Evaluators**")
             users_text = st.text_area("List names (comma separated)", ", ".join(auth_users))
             if st.button("Update Evaluators"):
                 new_users = [u.strip() for u in users_text.split(",")]
@@ -1122,7 +1163,7 @@ with tab7:
                 st.rerun()
             
             st.markdown("---")
-            st.markdown("**4. Data File Upload**")
+            st.markdown("**5. Data File Upload**")
             uploaded_file = st.file_uploader("Upload Raw Historical Stats (.xlsx)", type=["xlsx"])
             if uploaded_file:
                 with open(DATA_FILE, "wb") as f: f.write(uploaded_file.getbuffer())
@@ -1130,7 +1171,7 @@ with tab7:
                 st.rerun()
 
         st.markdown("---")
-        st.markdown("### 5. 🎛️ Draft & Algorithm Settings")
+        st.markdown("### 6. 🎛️ Draft & Algorithm Settings")
         st.write("Modify the mathematical importance of each metric, or configure the Salary Cap.")
         
         st.markdown("##### 🎯 Salary Cap Rules")
@@ -1141,9 +1182,9 @@ with tab7:
         
         if not master_df.empty:
             valid_teams_ct = len([t for t in TEAMS if t != "Available"])
-            ideal_pool = master_df[(master_df['Pool Status'] == "Team Player") & (master_df['AI Rating'] > 0)].sort_values('AI Rating', ascending=False).head(valid_teams_ct * w_squad_size)
-            suggested_cap = ideal_pool['AI Rating'].sum() / valid_teams_ct if valid_teams_ct > 0 else 0.0
-            sc3.info(f"**Suggested Cap:** {suggested_cap:.1f} pts\n\n*(Based on top {valid_teams_ct * w_squad_size} Team Players)*")
+            ideal_pool = master_df[(master_df['Pool Status'] == "Team Player") & (master_df['Final Scout Rating'] > 0)].sort_values('Final Scout Rating', ascending=False).head(valid_teams_ct * w_squad_size)
+            suggested_cap = ideal_pool['Final Scout Rating'].sum() / valid_teams_ct if valid_teams_ct > 0 else 0.0
+            sc3.info(f"**Suggested Cap:** {suggested_cap:.1f} pts\n\n*(Based on top {valid_teams_ct * w_squad_size} Team Players by Final Scout Rating)*")
         
         st.markdown("##### 🏏 Batting Metrics (%)")
         b1, b2, b3, b4, b5 = st.columns(5)
@@ -1194,7 +1235,7 @@ with tab7:
             st.rerun()
 
         st.markdown("---")
-        st.markdown("### 6. 🛠️ Player Name Aliases & Merge Tool")
+        st.markdown("### 7. 🛠️ Player Name Aliases & Merge Tool")
         st.write("Edit the **'Merged Name'** column to fuse mismatched names from your Google Form and Excel sheet.")
         
         all_possible_names = sorted(list(set(all_raw_names + raw_live_names)))
@@ -1214,7 +1255,7 @@ with tab7:
             st.info("Upload an Excel file or connect a Google Sheet to start mapping names.")
 
         st.markdown("---")
-        st.markdown("### 7. 💾 Permanent Cloud Backup & Restore")
+        st.markdown("### 8. 💾 Permanent Cloud Backup & Restore")
         st.write("Legacy local file download and restore.")
         
         bc1, bc2 = st.columns(2)
@@ -1262,7 +1303,7 @@ with tab7:
                 st.rerun()
                 
         st.markdown("---")
-        st.markdown("### 8. ☁️ Google Sheets Database Sync")
+        st.markdown("### 9. ☁️ Google Sheets Database Sync")
         st.write("Turn your Google Sheet into a permanent database! **Important:** You must create a blank tab named exactly `System_State` in your Google Sheet, and your Streamlit Secrets must contain your Service Account JSON.")
         
         gs_1, gs_2 = st.columns(2)
