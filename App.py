@@ -567,8 +567,18 @@ with tab2:
     if master_df.empty:
         st.info("Data required.")
     else:
-        st.subheader("🎯 Primary Team Selection (Total Cap)")
-        st.caption("All draft values, budgets, and grid cells are powered by the **Final Scout Rating**.")
+        c_title, c_btn = st.columns([8, 2])
+        with c_title:
+            st.subheader("🎯 Primary Team Selection (Total Cap)")
+            st.caption("All draft values, budgets, and grid cells are powered by the **Final Scout Rating**.")
+        with c_btn:
+            if st.button("🧹 Clear Primary Grid", use_container_width=True):
+                draft_state.clear()
+                save_json(DRAFT_FILE, draft_state)
+                push_state_to_gsheets()
+                if "live_grid" in st.session_state:
+                    del st.session_state["live_grid"]
+                st.rerun()
         
         squad_size = int(algo_weights.get("squad_size", 11))
         team_budget = float(algo_weights.get("team_budget", 240.0))
@@ -627,16 +637,18 @@ with tab2:
                     if not p_match.empty:
                         grid_df.iat[i, grid_df.columns.get_loc(f"{t} Rtg")] = float(p_match.iloc[0]['Final Scout Rating'])
 
-        # Pre-compute the true available pool
-        true_avail_df = master_df[(master_df['Draft Status'] == "Available") & (master_df['Pool Status'] == "Team Player")]
+        # Pre-compute drafted players across the entire Primary grid
+        drafted_primary_players = list(draft_state.keys())
 
         col_config = {}
         for t in valid_teams:
-            # Get players drafted explicitly by THIS team
-            team_drafted_df = master_df[master_df['Draft Status'] == t]
+            t_drafted_df = master_df[master_df['Draft Status'] == t]
             
-            # Combine the team's roster with the overall available pool
-            combined_opts_df = pd.concat([team_drafted_df, true_avail_df]).sort_values('Final Scout Rating', ascending=False)
+            # True Available for Primary Grid
+            avail_mask = (~master_df['Player'].isin(drafted_primary_players)) & (master_df['Pool Status'] == "Team Player")
+            
+            # Combine team's roster with the true available pool, sorted descending by Scout Rating
+            combined_opts_df = pd.concat([t_drafted_df, master_df[avail_mask]]).sort_values('Final Scout Rating', ascending=False)
             
             opts = ["--- CLEAR PICK ---"] + [player_to_string_map[row['Player']] for _, row in combined_opts_df.iterrows()]
             
@@ -747,7 +759,7 @@ with tab2:
             # Mask 2: Team Roster (Players drafted specifically by THIS team)
             team_mask = master_df['Player'].isin(t_drafted_lvl_players)
             
-            # Combine and strictly sort by Final Scout Rating
+            # Combine and strictly sort by Final Scout Rating descending
             combined_opts_df_lvl = master_df[avail_mask | team_mask].sort_values('Final Scout Rating', ascending=False)
             
             opts_lvl = ["--- CLEAR PICK ---"] + [player_to_string_map[row['Player']] for _, row in combined_opts_df_lvl.iterrows()]
