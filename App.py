@@ -9,6 +9,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 from streamlit_gsheets import GSheetsConnection
 import time
+import base64
 
 st.set_page_config(page_title="BPL Cricket League", layout="wide", page_icon="🏏")
 
@@ -175,16 +176,25 @@ for t in valid_configured_teams:
     else:
         draft_locks_level[t] = existing_locks[:squad_size]
 
-# --- HEADER ---
-col_h1, col_h2 = st.columns([1, 15])
-with col_h1:
-    if os.path.exists("logo.png"):
-        st.image("logo.png", width=60)
-    else:
-        st.markdown("<h1 style='text-align: center;'>🏏</h1>", unsafe_allow_html=True)
-with col_h2:
-    st.title("BPL Cricket League")
-st.markdown("Advanced AI Rating, Live Roster Management, and Committee Ratings.")
+# --- FULL-WIDTH CENTERED HEADER ---
+logo_html = "<span style='font-size: 50px; vertical-align: middle; margin-right: 20px;'>🏏</span>"
+if os.path.exists("logo.png"):
+    try:
+        with open("logo.png", "rb") as f:
+            img_data = base64.b64encode(f.read()).decode()
+        logo_html = f'<img src="data:image/png;base64,{img_data}" style="height: 80px; vertical-align: middle; margin-right: 20px;">'
+    except Exception:
+        pass
+
+st.markdown(f"""
+<div style="background-color: #f8f9fa; padding: 30px; border-radius: 10px; text-align: center; margin-bottom: 25px; border: 1px solid #e9ecef; width: 100%;">
+    <div style="display: inline-flex; align-items: center; justify-content: center;">
+        {logo_html}
+        <h1 style="margin: 0; padding: 0; color: #1f2937; font-size: 3em;">BPL Cricket League</h1>
+    </div>
+    <p style="margin: 10px 0 0 0; color: #6c757d; font-size: 1.2em;">Advanced AI Rating, Live Roster Management, and Committee Ratings.</p>
+</div>
+""", unsafe_allow_html=True)
 
 # --- DATA PROCESSING ENGINE ---
 @st.cache_data(show_spinner="Syncing Live Roster from Google Forms...", ttl=300)
