@@ -691,10 +691,21 @@ with tab2:
         for t in valid_teams:
             t_drafted_lvl_players = [p for p, team in draft_state_level.items() if team == t]
             
+            num_drafted = len(t_drafted_lvl_players)
+            next_round_idx = min(num_drafted, squad_size - 1)
+            
+            spent_so_far = sum([int(master_df[master_df['Player'] == p]['Final Scout Rating'].iloc[0]) for p in t_drafted_lvl_players if p in master_df['Player'].values])
+            
+            if next_round_idx == squad_size - 1:
+                affordable_limit = 999 
+            else:
+                affordable_limit = cum_limits[next_round_idx] - spent_so_far
+            
             avail_mask = (~master_df['Player'].isin(drafted_level_players)) & (master_df['Pool Status'] == "Team Player")
+            affordable_mask = master_df['Final Scout Rating'] <= affordable_limit
             team_mask = master_df['Player'].isin(t_drafted_lvl_players)
             
-            combined_opts_df_lvl = master_df[avail_mask | team_mask].sort_values('Final Scout Rating', ascending=False)
+            combined_opts_df_lvl = master_df[(avail_mask & affordable_mask) | team_mask].sort_values('Final Scout Rating', ascending=False)
             opts_lvl = ["--- CLEAR PICK ---"] + [player_to_string_map[row['Player']] for _, row in combined_opts_df_lvl.iterrows()]
             
             level_col_config[t] = st.column_config.SelectboxColumn(t, options=opts_lvl, required=False)
@@ -704,8 +715,8 @@ with tab2:
         rtg_cols = [f"{t} Rtg" for t in valid_teams]
         styled_level_grid = level_grid_df.style.background_gradient(subset=rtg_cols, cmap='RdYlGn', vmin=0, vmax=30).format({c: "{:.0f}" for c in rtg_cols}, na_rep="")
         
-        # 70% / 30% Non-scrollable layout
-        c_left, c_right = st.columns([7, 3])
+        # 80% / 20% Non-scrollable layout
+        c_left, c_right = st.columns([8, 2])
         with c_left:
             level_grid_key = f"live_grid_level_{st.session_state.get('level_grid_version', 0)}"
             edited_level_grid = st.data_editor(styled_level_grid, column_config=level_col_config, use_container_width=True, key=level_grid_key)
