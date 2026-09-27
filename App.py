@@ -602,6 +602,9 @@ with tab2:
     if master_df.empty:
         st.info("Data required.")
     else:
+        # Create an O(1) high-speed dictionary for ratings to prevent lag
+        p_to_rating = dict(zip(master_df['Player'], master_df['Final Scout Rating'].astype(int)))
+        
         squad_size = int(algo_weights.get("squad_size", 11))
         team_budget = float(algo_weights.get("team_budget", 240.0))
         valid_teams = [t for t in TEAMS if t != "Available"]
@@ -688,9 +691,7 @@ with tab2:
                     base_string = player_to_string_map.get(p_name, p_name)
                     mapped_string = f"{PICKED_MARKER}{base_string}"
                     level_grid_df.iat[i, level_grid_df.columns.get_loc(t)] = mapped_string
-                    p_match = master_df[master_df['Player'] == p_name]
-                    if not p_match.empty:
-                        level_grid_df.iat[i, level_grid_df.columns.get_loc(f"{t} Rtg")] = int(p_match.iloc[0]['Final Scout Rating'])
+                    level_grid_df.iat[i, level_grid_df.columns.get_loc(f"{t} Rtg")] = p_to_rating.get(p_name, np.nan)
 
         drafted_level_players = list(draft_state_level.keys())
         level_col_config = {}
@@ -701,7 +702,7 @@ with tab2:
             num_drafted = len(t_drafted_lvl_players)
             next_round_idx = min(num_drafted, squad_size - 1)
             
-            spent_so_far = sum([int(master_df[master_df['Player'] == p]['Final Scout Rating'].iloc[0]) for p in t_drafted_lvl_players if p in master_df['Player'].values])
+            spent_so_far = sum([p_to_rating.get(p, 0) for p in t_drafted_lvl_players])
             
             if next_round_idx == squad_size - 1:
                 affordable_limit = 999 
@@ -712,12 +713,12 @@ with tab2:
             affordable_mask = master_df['Final Scout Rating'] <= affordable_limit
             team_mask = master_df['Player'].isin(t_drafted_lvl_players)
             
-            combined_opts_df_lvl = master_df[(avail_mask & affordable_mask) | team_mask].sort_values('Final Scout Rating', ascending=False)
+            valid_players_for_team = master_df[(avail_mask & affordable_mask) | team_mask].sort_values('Final Scout Rating', ascending=False)['Player'].tolist()
             
             opts_lvl = ["--- CLEAR PICK ---"]
-            for _, row in combined_opts_df_lvl.iterrows():
-                base_str = player_to_string_map[row['Player']]
-                if row['Player'] in t_drafted_lvl_players:
+            for p in valid_players_for_team:
+                base_str = player_to_string_map.get(p, p)
+                if p in t_drafted_lvl_players:
                     opts_lvl.append(f"{PICKED_MARKER}{base_str}")
                 else:
                     opts_lvl.append(base_str)
@@ -744,11 +745,10 @@ with tab2:
                 running_spent = 0.0
                 for i in range(squad_size):
                     val = edited_level_grid.iat[i, edited_level_grid.columns.get_loc(t)]
-                    if isinstance(val, str): val = val.replace(PICKED_MARKER, "")
+                    if pd.notna(val) and isinstance(val, str): 
+                        val = val.replace(PICKED_MARKER, "")
                     clean_name = string_to_player_map.get(val, "")
-                    p_match = master_df[master_df['Player'] == clean_name]
-                    if not p_match.empty:
-                        running_spent += float(p_match.iloc[0]['Final Scout Rating'])
+                    running_spent += p_to_rating.get(clean_name, 0)
                     rem_df.iat[i, rem_df.columns.get_loc(t)] = cum_limits[i] - running_spent
 
             def style_remainings(val):
@@ -785,17 +785,20 @@ with tab2:
                 
                 new_draft_locks_level[t][i] = new_lock
                 
-                if old_lock and old_val != new_val:
+                old_clean = str(old_val).replace(PICKED_MARKER, "") if pd.notna(old_val) else ""
+                new_clean = str(new_val).replace(PICKED_MARKER, "") if pd.notna(new_val) else ""
+                
+                if old_lock and old_clean != new_clean:
                     level_grid_changed = True
                     st.session_state.draft_error_level = f"❌ REJECTED: Slot for {t} in Rnd {i+1} is locked! Unlock it first."
                     has_error = True
                 
-                if new_lock and not new_val:
+                if new_lock and not new_clean:
                     level_grid_changed = True
                     st.session_state.draft_error_level = f"❌ CANNOT LOCK: Slot for {t} in Rnd {i+1} is empty! Select a player first."
                     has_error = True
 
-                if old_val != new_val:
+                if old_clean != new_clean:
                     level_grid_changed = True
                 
                 if old_lock != new_lock:
@@ -814,8 +817,7 @@ with tab2:
                         clean_name = string_to_player_map.get(val, "")
                         if clean_name: t_players.append(clean_name)
                         
-                        t_spent_round = sum([int(master_df[master_df['Player'] == p]['Final Scout Rating'].iloc[0]) for p in t_players if p in master_df['Player'].values])
-                        
+                        t_spent_round = sum([p_to_rating.get(p, 0) for p in t_players])
                         is_final_round = (i == squad_size - 1)
                         
                         if t_spent_round > cum_limits[i] and not is_final_round:
