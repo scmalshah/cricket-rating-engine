@@ -48,6 +48,7 @@ DEFAULT_WEIGHTS = {
 
 DEFAULT_CONFIG = {
     "gsheet_url": "https://docs.google.com/spreadsheets/d/16j0UEOr_DN-kDNjyFt65IxJxnuEWjyto4o_4ShA4SN0/edit?resourcekey=&gid=436661694#gid=436661694",
+    "gsheet_worksheet": "Form Responses 1",
     "gsheet_col": "Full Name",
     "gsheet_pool_col": "How do you want to play?",
     "teams": ["Team 1", "Team 2", "Team 3", "Team 4", "Team 5"],
@@ -203,33 +204,55 @@ st.markdown(f"""
 
 # --- DATA PROCESSING ENGINE ---
 @st.cache_data(show_spinner="Syncing Live Roster from Google Forms...", ttl=300)
-def get_raw_live_roster(url, col_name, pool_col_name):
+def get_raw_live_roster(url, col_name, pool_col_name, worksheet_name="Form Responses 1"):
     if not url or not col_name: 
         return pd.DataFrame()
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
-        df = conn.read(spreadsheet=url, ttl=300)
+        candidates = []
+        if worksheet_name and str(worksheet_name).strip():
+            candidates.append(str(worksheet_name).strip())
+        candidates.extend(["Form Responses 1", "Form responses 1", "Form Responses", "Sheet1"])
         
-        match_col = next((c for c in df.columns if str(c).strip().lower() == col_name.strip().lower()), None)
-        match_pool_col = next((c for c in df.columns if pool_col_name and str(c).strip().lower() == pool_col_name.strip().lower()), None)
-        
-        if match_col:
-            res = pd.DataFrame()
-            res['Raw_Name'] = df[match_col].dropna().astype(str).apply(clean_prefix).str.strip()
-            res = res[res['Raw_Name'] != ""]
-            
-            if match_pool_col:
-                res['Form_Pool_Status'] = df[match_pool_col].astype(str).fillna("")
-                def parse_pool(val):
-                    v = str(val).lower()
-                    if 'pool' in v: return 'Pool Player'
-                    return 'Team Player'
-                res['Form_Pool_Status'] = res['Form_Pool_Status'].apply(parse_pool)
-            else:
-                res['Form_Pool_Status'] = "Team Player"
+        df = None
+        for ws in candidates:
+            try:
+                temp_df = conn.read(spreadsheet=url, worksheet=ws, ttl=300)
+                if not temp_df.empty and any(str(c).strip().lower() == col_name.strip().lower() for c in temp_df.columns):
+                    df = temp_df
+                    break
+            except Exception:
+                continue
                 
-            st.session_state["last_valid_roster"] = res
-            return res
+        if df is None:
+            try:
+                temp_df = conn.read(spreadsheet=url, ttl=300)
+                if not temp_df.empty and any(str(c).strip().lower() == col_name.strip().lower() for c in temp_df.columns):
+                    df = temp_df
+            except Exception:
+                pass
+
+        if df is not None:
+            match_col = next((c for c in df.columns if str(c).strip().lower() == col_name.strip().lower()), None)
+            match_pool_col = next((c for c in df.columns if pool_col_name and str(c).strip().lower() == pool_col_name.strip().lower()), None)
+            
+            if match_col:
+                res = pd.DataFrame()
+                res['Raw_Name'] = df[match_col].dropna().astype(str).apply(clean_prefix).str.strip()
+                res = res[res['Raw_Name'] != ""]
+                
+                if match_pool_col:
+                    res['Form_Pool_Status'] = df[match_pool_col].astype(str).fillna("")
+                    def parse_pool(val):
+                        v = str(val).lower()
+                        if 'pool' in v: return 'Pool Player'
+                        return 'Team Player'
+                    res['Form_Pool_Status'] = res['Form_Pool_Status'].apply(parse_pool)
+                else:
+                    res['Form_Pool_Status'] = "Team Player"
+                    
+                st.session_state["last_valid_roster"] = res
+                return res
         return pd.DataFrame()
     except Exception as e:
         if "429" in str(e):
@@ -447,7 +470,12 @@ def calculate_ratings(raw_bat, raw_bowl, raw_field, mapping, w, valid_players=No
 file_time = os.path.getmtime(DATA_FILE) if os.path.exists(DATA_FILE) else 0
 
 raw_bat_cache, raw_bowl_cache, raw_field_cache, all_raw_names = get_raw_excel_data(file_time)
-raw_live_df = get_raw_live_roster(app_config.get("gsheet_url"), app_config.get("gsheet_col"), app_config.get("gsheet_pool_col"))
+raw_live_df = get_raw_live_roster(
+    app_config.get("gsheet_url"), 
+    app_config.get("gsheet_col"), 
+    app_config.get("gsheet_pool_col"),
+    app_config.get("gsheet_worksheet", "Form Responses 1")
+)
 raw_live_names = raw_live_df['Raw_Name'].tolist() if not raw_live_df.empty else []
 
 if not raw_live_df.empty:
@@ -531,6 +559,9 @@ with tab1:
     if master_df.empty:
         st.info("👋 Welcome! Please navigate to the '⚙️ Admin & Data' tab and connect your Excel Data or Google Form Roster.")
     else:
+        if raw_live_df.empty and app_config.get("gsheet_url"):
+            st.warning("⚠️ **Notice:** Google Form roster did not connect or could not find 'Full Name'. Running on offline Excel data (64 players). Check the **Admin & Data** tab to ensure the **Worksheet Tab Name** matches your responses sheet (e.g. `Form Responses 1`).")
+            
         st.subheader("Live Interactive Dashboard")
         
         total_p = len(master_df)
@@ -1230,13 +1261,15 @@ with tab7:
         st.markdown("### 🔗 1. Live Registration Roster (Google Forms)")
         st.write("Link your Google Form results to automatically build the Draft Pool.")
         
-        g1, g2, g3 = st.columns([2, 1, 1])
+        g1, g2, g3, g4 = st.columns([2, 1, 1, 1])
         new_gsheet_url = g1.text_input("Google Sheet URL", value=app_config.get("gsheet_url", ""))
-        new_gsheet_col = g2.text_input("Header: Names", value=app_config.get("gsheet_col", "Full Name"))
-        new_gsheet_pool_col = g3.text_input("Header: Pool Status", value=app_config.get("gsheet_pool_col", "How do you want to play?"))
+        new_gsheet_ws = g2.text_input("Worksheet Tab Name", value=app_config.get("gsheet_worksheet", "Form Responses 1"))
+        new_gsheet_col = g3.text_input("Header: Names", value=app_config.get("gsheet_col", "Full Name"))
+        new_gsheet_pool_col = g4.text_input("Header: Pool Status", value=app_config.get("gsheet_pool_col", "How do you want to play?"))
         
         if st.button("🔗 Sync Google Roster"):
             app_config["gsheet_url"] = new_gsheet_url
+            app_config["gsheet_worksheet"] = new_gsheet_ws
             app_config["gsheet_col"] = new_gsheet_col
             app_config["gsheet_pool_col"] = new_gsheet_pool_col
             save_json(CONFIG_FILE, app_config)
@@ -1397,7 +1430,7 @@ with tab7:
         if st.button("⚙️ Save Custom Settings & Recalculate"):
             new_weights = {
                 "squad_size": w_squad_size, "team_budget": w_team_budget,
-                "bat_runs": w_bat_runs, "bat_avg": w_bat_avg, "bat_sr": w_bat_sr, "bat_bpd": w_bat_bpd, "bat_bound": w_bat_bound,
+                "bat_runs": w_bat_runs, "bat_avg": w_bat_sr, "bat_sr": w_bat_sr, "bat_bpd": w_bat_bpd, "bat_bound": w_bat_bound,
                 "bowl_wkts": w_bowl_wkts, "bowl_econ": w_bowl_econ, "bowl_avg": w_bowl_avg, "bowl_sr": w_bowl_sr, "bowl_dots": w_bowl_dots, "bowl_extras": w_bowl_extras,
                 "wt_batter_bat": w_wt_batter_bat, "wt_batter_field": w_wt_batter_field,
                 "wt_bowler_bowl": w_wt_bowler_bowl, "wt_bowler_field": w_wt_bowler_field,
