@@ -602,7 +602,6 @@ with tab2:
     if master_df.empty:
         st.info("Data required.")
     else:
-        # Create an O(1) high-speed dictionary for ratings to prevent lag
         p_to_rating = dict(zip(master_df['Player'], master_df['Final Scout Rating'].astype(int)))
         
         squad_size = int(algo_weights.get("squad_size", 11))
@@ -785,15 +784,18 @@ with tab2:
                 
                 new_draft_locks_level[t][i] = new_lock
                 
-                old_clean = str(old_val).replace(PICKED_MARKER, "") if pd.notna(old_val) else ""
-                new_clean = str(new_val).replace(PICKED_MARKER, "") if pd.notna(new_val) else ""
+                old_val_str = str(old_val) if pd.notna(old_val) and old_val else ""
+                new_val_str = str(new_val) if pd.notna(new_val) and new_val else ""
+                
+                old_clean = old_val_str.replace(PICKED_MARKER, "").strip()
+                new_clean = new_val_str.replace(PICKED_MARKER, "").strip()
                 
                 if old_lock and old_clean != new_clean:
                     level_grid_changed = True
                     st.session_state.draft_error_level = f"❌ REJECTED: Slot for {t} in Rnd {i+1} is locked! Unlock it first."
                     has_error = True
                 
-                if new_lock and not new_clean:
+                if new_lock and (not new_clean or new_clean == "--- CLEAR PICK ---" or new_clean.strip() == ""):
                     level_grid_changed = True
                     st.session_state.draft_error_level = f"❌ CANNOT LOCK: Slot for {t} in Rnd {i+1} is empty! Select a player first."
                     has_error = True
@@ -853,6 +855,8 @@ with tab2:
                     st.session_state["last_gsheet_sync"] = current_time
                 else:
                     st.toast("✅ Pick saved locally! Cloud sync runs every 4 minutes to prevent quota errors.")
+                
+                st.session_state["level_grid_version"] = st.session_state.get("level_grid_version", 0) + 1
                 st.rerun()
 
         st.markdown("---")
