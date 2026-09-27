@@ -656,7 +656,9 @@ with tab2:
                 st.success("✅ Board synced to the cloud!")
         with c_lvl_btn:
             if st.button("🧹 Clear Draft Board", use_container_width=True):
+                kept_players = {p: t for p, t in draft_state_level.items() if leadership_state.get(p) in ["Captain", "Vice Captain"]}
                 draft_state_level.clear()
+                draft_state_level.update(kept_players)
                 for t in valid_teams:
                     draft_locks_level[t] = [False] * squad_size
                 save_json(DRAFT_LEVEL_FILE, draft_state_level)
@@ -685,12 +687,25 @@ with tab2:
 
         for t in valid_teams:
             t_players = [p for p, team in draft_state_level.items() if team == t]
+            
+            def role_sort(player):
+                role = leadership_state.get(player, "None")
+                if role == "Captain": return 0
+                if role == "Vice Captain": return 1
+                return 2
+            
+            t_players.sort(key=role_sort)
+            
             for i, p_name in enumerate(t_players):
                 if i < squad_size:
                     base_string = player_to_string_map.get(p_name, p_name)
                     mapped_string = f"{PICKED_MARKER}{base_string}"
                     level_grid_df.iat[i, level_grid_df.columns.get_loc(t)] = mapped_string
                     level_grid_df.iat[i, level_grid_df.columns.get_loc(f"{t} Rtg")] = p_to_rating.get(p_name, np.nan)
+                    
+                    if role_sort(p_name) < 2 and not draft_locks_level[t][i]:
+                        level_grid_df.iat[i, level_grid_df.columns.get_loc(f"{t} 🔒")] = True
+                        draft_locks_level[t][i] = True
 
         drafted_level_players = list(draft_state_level.keys())
         level_col_config = {}
@@ -1296,7 +1311,7 @@ with tab7:
                     hide_index=True, use_container_width=True
                 )
                 if st.button("💾 Save Rosters, Roles & Pool"):
-                    new_draft_level = dict(zip(edited_draft["Player"], edited_draft["Draft Status"]))
+                    new_draft_level = {p: s for p, s in zip(edited_draft["Player"], edited_draft["Draft Status"]) if s != "Available"}
                     new_pool = dict(zip(edited_draft["Player"], edited_draft["Pool Status"]))
                     
                     new_leaders = dict(zip(edited_draft["Player"], edited_draft["Leadership"]))
