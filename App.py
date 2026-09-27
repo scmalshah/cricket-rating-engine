@@ -28,6 +28,8 @@ CONFIG_FILE = "app_config.json"
 
 ADMIN_PASSWORD = "bpladmin" 
 
+PICKED_MARKER = "✅ "
+
 DEFAULT_MAPPINGS = {
     "Praveenraj Starkey": "Praveenraj Starkey (Merged)",
     "Praveen Starkey": "Praveenraj Starkey (Merged)",
@@ -683,7 +685,8 @@ with tab2:
             t_players = [p for p, team in draft_state_level.items() if team == t]
             for i, p_name in enumerate(t_players):
                 if i < squad_size:
-                    mapped_string = player_to_string_map.get(p_name, p_name)
+                    base_string = player_to_string_map.get(p_name, p_name)
+                    mapped_string = f"{PICKED_MARKER}{base_string}"
                     level_grid_df.iat[i, level_grid_df.columns.get_loc(t)] = mapped_string
                     p_match = master_df[master_df['Player'] == p_name]
                     if not p_match.empty:
@@ -710,7 +713,14 @@ with tab2:
             team_mask = master_df['Player'].isin(t_drafted_lvl_players)
             
             combined_opts_df_lvl = master_df[(avail_mask & affordable_mask) | team_mask].sort_values('Final Scout Rating', ascending=False)
-            opts_lvl = ["--- CLEAR PICK ---"] + [player_to_string_map[row['Player']] for _, row in combined_opts_df_lvl.iterrows()]
+            
+            opts_lvl = ["--- CLEAR PICK ---"]
+            for _, row in combined_opts_df_lvl.iterrows():
+                base_str = player_to_string_map[row['Player']]
+                if row['Player'] in t_drafted_lvl_players:
+                    opts_lvl.append(f"{PICKED_MARKER}{base_str}")
+                else:
+                    opts_lvl.append(base_str)
             
             level_col_config[t] = st.column_config.SelectboxColumn(t, options=opts_lvl, required=False)
             level_col_config[f"{t} 🔒"] = st.column_config.CheckboxColumn("🔒", default=False)
@@ -734,6 +744,7 @@ with tab2:
                 running_spent = 0.0
                 for i in range(squad_size):
                     val = edited_level_grid.iat[i, edited_level_grid.columns.get_loc(t)]
+                    if isinstance(val, str): val = val.replace(PICKED_MARKER, "")
                     clean_name = string_to_player_map.get(val, "")
                     p_match = master_df[master_df['Player'] == clean_name]
                     if not p_match.empty:
@@ -799,6 +810,7 @@ with tab2:
                     t_players = []
                     for i in range(squad_size):
                         val = edited_level_grid.iat[i, edited_level_grid.columns.get_loc(t)]
+                        if isinstance(val, str): val = val.replace(PICKED_MARKER, "")
                         clean_name = string_to_player_map.get(val, "")
                         if clean_name: t_players.append(clean_name)
                         
