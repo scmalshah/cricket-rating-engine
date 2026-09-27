@@ -642,10 +642,14 @@ with tab2:
         st.markdown("---")
         
         # --- LEVEL-WISE DRAFT GRID ---
-        c_lvl_title, c_lvl_btn = st.columns([8, 2])
+        c_lvl_title, c_lvl_sync, c_lvl_btn = st.columns([6, 2, 2])
         with c_lvl_title:
             st.markdown("#### Selection Board & Round Limits")
             st.caption("Toggle the **🔒** box to lock a player. You may exceed limits *only* on the final pick. Edit limits in the Remainings Table below.")
+        with c_lvl_sync:
+            if st.button("☁️ Sync to Cloud", use_container_width=True):
+                push_state_to_gsheets()
+                st.success("✅ Board synced to the cloud!")
         with c_lvl_btn:
             if st.button("🧹 Clear Draft Board", use_container_width=True):
                 draft_state_level.clear()
