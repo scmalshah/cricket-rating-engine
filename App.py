@@ -10,6 +10,7 @@ import plotly.express as px
 from streamlit_gsheets import GSheetsConnection
 import time
 import base64
+import datetime
 
 st.set_page_config(page_title="BPL Cricket League", layout="wide", page_icon="🏏")
 
@@ -25,6 +26,7 @@ LEADERSHIP_FILE = "leadership.json"
 POOL_FILE = "pool_status.json"
 OVERRIDES_FILE = "scout_overrides.json"
 CONFIG_FILE = "app_config.json"
+SCHEDULE_FILE = "schedule_state.json"
 
 ADMIN_PASSWORD = "bpladmin" 
 
@@ -107,6 +109,7 @@ def attempt_gsheets_restore():
                     elif key == "overrides": save_json(OVERRIDES_FILE, val)
                     elif key == "config": save_json(CONFIG_FILE, val)
                     elif key == "users": save_json(USERS_FILE, val)
+                    elif key == "schedule": save_json(SCHEDULE_FILE, val)
         except Exception: pass
 
 attempt_gsheets_restore()
@@ -131,6 +134,7 @@ pool_state = load_json(POOL_FILE, {})
 human_ratings = load_json(RATINGS_FILE, {}) 
 scout_overrides = load_json(OVERRIDES_FILE, {})
 auth_users = load_json(USERS_FILE, ["Admin", "Captain 1", "Captain 2"])
+schedule_state = load_json(SCHEDULE_FILE, [])
 
 algo_weights = load_json(WEIGHTS_FILE, DEFAULT_WEIGHTS)
 for k, v in DEFAULT_WEIGHTS.items():
@@ -145,7 +149,8 @@ def push_state_to_gsheets():
             "mappings": saved_mapping, "draft_level": draft_state_level, 
             "draft_locks_level": draft_locks_level, "ratings": human_ratings,
             "weights": algo_weights, "leadership": leadership_state, "pool": pool_state,
-            "overrides": scout_overrides, "config": app_config, "users": auth_users
+            "overrides": scout_overrides, "config": app_config, "users": auth_users,
+            "schedule": schedule_state
         }
         
         records = [{"Key": k, "Value": json.dumps(v)} for k, v in backup_data.items()]
@@ -552,7 +557,7 @@ if not master_df.empty:
         string_to_player_map[disp_string] = row['Player']
 
 # --- UI TABS ---
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["🏆 Live Dashboard", "🎯 Team Selection", "📊 Team Analytics", "🕸️ Player Profiles", "📝 Committee Ratings", "🧠 Methodology", "⚙️ Admin & Data"])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(["🏆 Live Dashboard", "🎯 Team Selection", "📊 Team Analytics", "🕸️ Player Profiles", "📝 Committee Ratings", "🧠 Methodology", "📅 Scheduler", "⚙️ Admin & Data"])
 
 # --- TAB 1: LIVE DASHBOARD ---
 with tab1:
@@ -560,7 +565,7 @@ with tab1:
         st.info("👋 Welcome! Please navigate to the '⚙️ Admin & Data' tab and connect your Excel Data or Google Form Roster.")
     else:
         if raw_live_df.empty and app_config.get("gsheet_url"):
-            st.warning("⚠️ **Notice:** Google Form roster did not connect or could not find 'Full Name'. Running on offline Excel data (64 players). Check the **Admin & Data** tab to ensure the **Worksheet Tab Name** matches your responses sheet (e.g. `Form Responses 1`).")
+            st.warning("⚠️ **Notice:** Google Form roster did not connect or could not find 'Full Name'. Running on offline Excel data. Check the **Admin & Data** tab to ensure the **Worksheet Tab Name** matches your responses sheet.")
             
         st.subheader("Live Interactive Dashboard")
         
@@ -775,7 +780,6 @@ with tab2:
         rtg_cols = [f"{t} Rtg" for t in valid_teams]
         styled_level_grid = level_grid_df.style.background_gradient(subset=rtg_cols, cmap='RdYlGn', vmin=0, vmax=30).format({c: "{:.0f}" for c in rtg_cols}, na_rep="")
         
-        # 80% / 20% Non-scrollable layout
         c_left, c_right = st.columns([8, 2])
         with c_left:
             level_grid_key = f"live_grid_level_{st.session_state.get('level_grid_version', 0)}"
@@ -1248,8 +1252,124 @@ with tab6:
     *   **Fielding Score:** The sum of all Catches, Run-Outs, and Stumpings.
     """)
 
-# --- TAB 7: ADMIN & DATA ---
+# --- TAB 7: SCHEDULER ---
 with tab7:
+    st.subheader("📅 League Scheduler")
+    st.write("Manage your match fixtures, warmup games, and playoffs. The auto-generator dynamically uses the Circle Method algorithm to guarantee teams will never play twice in the same weekend.")
+    
+    c1, c2 = st.columns([1, 3])
+    with c1:
+        st.markdown("#### ⚙️ Auto-Generate")
+        start_date = st.date_input("Start Date (Auto-advances to next Saturday)", value=datetime.date.today())
+        is_double = st.checkbox("Double Round Robin", value=True)
+        
+        if st.button("🔄 Generate Matches", use_container_width=True):
+            valid_t = [t for t in TEAMS if t != "Available"]
+            if len(valid_t) < 2:
+                st.error("Not enough configured teams to generate a schedule!")
+            else:
+                teams_list = list(valid_t)
+                if len(teams_list) % 2 != 0:
+                    teams_list.append("Bye")
+                
+                n_teams = len(teams_list)
+                rounds = []
+                
+                for r in range(n_teams - 1):
+                    round_matches = []
+                    for i in range(n_teams // 2):
+                        t1 = teams_list[i]
+                        t2 = teams_list[n_teams - 1 - i]
+                        if t1 != "Bye" and t2 != "Bye":
+                            if i % 2 == 0:
+                                round_matches.append((t1, t2))
+                            else:
+                                round_matches.append((t2, t1))
+                    rounds.append(round_matches)
+                    teams_list.insert(1, teams_list.pop())
+                
+                all_rounds = rounds.copy()
+                if is_double:
+                    for r in rounds:
+                        all_rounds.append([(t2, t1) for t1, t2 in r])
+                        
+                curr_date = start_date
+                while curr_date.weekday() != 5:
+                    curr_date += datetime.timedelta(days=1)
+                    
+                new_schedule = []
+                for rnd in all_rounds:
+                    for m_idx, match in enumerate(rnd):
+                        day_offset = m_idx % 2 
+                        match_date = curr_date + datetime.timedelta(days=day_offset)
+                        
+                        new_schedule.append({
+                            "Date": match_date.strftime("%b %d"),
+                            "Day": "Saturday" if day_offset == 0 else "Sunday",
+                            "Home Team": match[0],
+                            "Away Team": match[1],
+                            "Stage": "Round Robin"
+                        })
+                    curr_date += datetime.timedelta(days=7) 
+                
+                schedule_state.clear()
+                schedule_state.extend(new_schedule)
+                save_json(SCHEDULE_FILE, schedule_state)
+                push_state_to_gsheets()
+                st.rerun()
+                
+        if st.button("➕ Add Empty Row", use_container_width=True):
+            schedule_state.append({"Date": "", "Day": "", "Home Team": "", "Away Team": "", "Stage": "Round Robin"})
+            save_json(SCHEDULE_FILE, schedule_state)
+            st.rerun()
+            
+    with c2:
+        st.markdown("#### 📝 Master Schedule")
+        
+        df_sched = pd.DataFrame(schedule_state)
+        if df_sched.empty:
+            df_sched = pd.DataFrame(columns=["Date", "Day", "Home Team", "Away Team", "Stage"])
+        else:
+            for c in ["Date", "Day", "Home Team", "Away Team", "Stage"]:
+                if c not in df_sched.columns: df_sched[c] = ""
+        
+        disp_cols = {
+            "Date": "Date",
+            "Day": "Day",
+            "Home Team": "Home Team (Yellow - Toss Flips - Setup)",
+            "Away Team": "Away Team (Red - Toss Call - Cleanup)",
+            "Stage": "Stage"
+        }
+        df_disp = df_sched.rename(columns=disp_cols)
+        
+        stage_opts = ["Pre-Match", "Warmup", "Round Robin", "Playoffs", "Finals"]
+        day_opts = ["Saturday", "Sunday", "Friday", "Monday"]
+        team_opts = ["Pool", "Core"] + [t for t in TEAMS if t != "Available"]
+        
+        edited_sched = st.data_editor(
+            df_disp,
+            column_config={
+                "Day": st.column_config.SelectboxColumn("Day", options=day_opts),
+                "Home Team (Yellow - Toss Flips - Setup)": st.column_config.SelectboxColumn("Home Team", options=team_opts),
+                "Away Team (Red - Toss Call - Cleanup)": st.column_config.SelectboxColumn("Away Team", options=team_opts),
+                "Stage": st.column_config.SelectboxColumn("Stage", options=stage_opts)
+            },
+            num_rows="dynamic",
+            use_container_width=True,
+            key="sched_editor"
+        )
+        
+        if st.button("💾 Save Schedule Changes", type="primary"):
+            rev_cols = {v:k for k,v in disp_cols.items()}
+            save_df = edited_sched.rename(columns=rev_cols)
+            schedule_state.clear()
+            schedule_state.extend(save_df.to_dict(orient="records"))
+            save_json(SCHEDULE_FILE, schedule_state)
+            push_state_to_gsheets()
+            st.success("✅ Schedule saved to Cloud!")
+
+# --- TAB 8: ADMIN & DATA ---
+with tab8:
     st.subheader("⚙️ System Management")
     
     password_attempt = st.text_input("Enter Admin Password to unlock controls", type="password")
@@ -1430,7 +1550,7 @@ with tab7:
         if st.button("⚙️ Save Custom Settings & Recalculate"):
             new_weights = {
                 "squad_size": w_squad_size, "team_budget": w_team_budget,
-                "bat_runs": w_bat_runs, "bat_avg": w_bat_sr, "bat_sr": w_bat_sr, "bat_bpd": w_bat_bpd, "bat_bound": w_bat_bound,
+                "bat_runs": w_bat_runs, "bat_avg": w_bat_avg, "bat_sr": w_bat_sr, "bat_bpd": w_bat_bpd, "bat_bound": w_bat_bound,
                 "bowl_wkts": w_bowl_wkts, "bowl_econ": w_bowl_econ, "bowl_avg": w_bowl_avg, "bowl_sr": w_bowl_sr, "bowl_dots": w_bowl_dots, "bowl_extras": w_bowl_extras,
                 "wt_batter_bat": w_wt_batter_bat, "wt_batter_field": w_wt_batter_field,
                 "wt_bowler_bowl": w_wt_bowler_bowl, "wt_bowler_field": w_wt_bowler_field,
@@ -1477,7 +1597,8 @@ with tab7:
                 "pool": pool_state,
                 "overrides": scout_overrides,
                 "config": app_config,
-                "users": auth_users
+                "users": auth_users,
+                "schedule": schedule_state
             }
             backup_json = json.dumps(backup_data, indent=2).encode('utf-8')
             st.download_button(
@@ -1507,6 +1628,7 @@ with tab7:
                     if "overrides" in restore_data: save_json(OVERRIDES_FILE, restore_data.get("overrides", {}))
                     if "config" in restore_data: save_json(CONFIG_FILE, restore_data.get("config", {}))
                     if "users" in restore_data: save_json(USERS_FILE, restore_data.get("users", []))
+                    if "schedule" in restore_data: save_json(SCHEDULE_FILE, restore_data.get("schedule", []))
                     st.success("✅ Server state fully restored!")
                 push_state_to_gsheets()
                 st.rerun()
@@ -1545,6 +1667,7 @@ with tab7:
                                 elif key == "overrides": save_json(OVERRIDES_FILE, val)
                                 elif key == "config": save_json(CONFIG_FILE, val)
                                 elif key == "users": save_json(USERS_FILE, val)
+                                elif key == "schedule": save_json(SCHEDULE_FILE, val)
                             st.success("✅ State fully restored from Google Sheets!")
                             st.rerun()
                         else:
